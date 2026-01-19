@@ -99,8 +99,10 @@ app.post('/verify', strictRateLimit, async (c) => {
 
     // Check if user exists
     let user = await dbService.getUserByEmail(email);
+    let isNewUser = false;
 
     if (!user) {
+      isNewUser = true;
       // Create new user
       user = await dbService.createUser({
         id: nanoid(),
@@ -117,6 +119,18 @@ app.post('/verify', strictRateLimit, async (c) => {
         identifier: email,
         verified: 1,
         is_primary: 1,
+      });
+
+      // Create default organization for new user
+      const orgSlug = `user-${user.id.slice(0, 8)}`;
+      const orgName = email.split('@')[0] || 'My Organization';
+      await dbService.createDefaultOrganizationForUser({
+        orgId: nanoid(),
+        memberId: nanoid(),
+        billingId: nanoid(),
+        userId: user.id,
+        orgSlug,
+        orgName: `${orgName}'s Org`,
       });
     } else {
       // Update email verification status

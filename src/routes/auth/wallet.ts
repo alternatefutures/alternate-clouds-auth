@@ -146,6 +146,18 @@ app.post('/verify', strictRateLimit, async (c) => {
         verified: 1,
         is_primary: 1,
       });
+
+      // Create default organization for new user
+      const orgSlug = `user-${user.id.slice(0, 8)}`;
+      const shortAddress = address.slice(0, 6) + '...' + address.slice(-4);
+      await dbService.createDefaultOrganizationForUser({
+        orgId: nanoid(),
+        memberId: nanoid(),
+        billingId: nanoid(),
+        userId: user.id,
+        orgSlug,
+        orgName: `${shortAddress}'s Org`,
+      });
     }
 
     // Generate JWT tokens
