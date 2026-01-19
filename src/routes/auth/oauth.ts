@@ -145,6 +145,18 @@ app.get('/callback/:provider', async (c) => {
         verified: 1,
         is_primary: 1,
       });
+
+      // Create default organization for new user
+      const orgSlug = `user-${user.id.slice(0, 8)}`;
+      const orgName = oauthUserInfo.name || oauthUserInfo.email?.split('@')[0] || 'My Organization';
+      await dbService.createDefaultOrganizationForUser({
+        orgId: nanoid(),
+        memberId: nanoid(),
+        billingId: nanoid(),
+        userId: user.id,
+        orgSlug,
+        orgName: `${orgName}'s Org`,
+      });
     }
 
     // Generate JWT tokens
