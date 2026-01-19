@@ -1296,6 +1296,55 @@ export class DatabaseService {
     });
   }
 
+  /**
+   * Create a default organization for a new user (with membership and billing)
+   * This is called when a user signs up via email, wallet, or OAuth
+   */
+  async createDefaultOrganizationForUser(params: {
+    orgId: string;
+    memberId: string;
+    billingId: string;
+    userId: string;
+    orgSlug: string;
+    orgName: string;
+  }): Promise<Organization> {
+    const { orgId, memberId, billingId, userId, orgSlug, orgName } = params;
+
+    // Use transaction to ensure all three are created atomically
+    const [org] = await this.prisma.$transaction([
+      this.prisma.organization.create({
+        data: {
+          id: orgId,
+          slug: orgSlug,
+          name: orgName,
+        },
+      }),
+      this.prisma.organizationMember.create({
+        data: {
+          id: memberId,
+          organizationId: orgId,
+          userId: userId,
+          role: 'OWNER',
+        },
+      }),
+      this.prisma.organizationBilling.create({
+        data: {
+          id: billingId,
+          organizationId: orgId,
+        },
+      }),
+    ]);
+
+    return {
+      id: org.id,
+      slug: org.slug,
+      name: org.name,
+      avatar_url: org.avatarUrl ?? undefined,
+      created_at: org.createdAt.getTime(),
+      updated_at: org.updatedAt.getTime(),
+    };
+  }
+
   // ============================================
   // BILLING CUSTOMER METHODS
   // ============================================
