@@ -80,10 +80,42 @@ export interface SIWEChallenge {
 export interface PersonalAccessToken {
   id: string;
   user_id: string;
+  organization_id?: string;
   name: string;
   token: string;
   expires_at?: number;
   last_used_at?: number;
+  created_at: number;
+  updated_at: number;
+}
+
+// ============================================
+// ORGANIZATION INTERFACES
+// ============================================
+
+export type OrgRole = 'OWNER' | 'ADMIN' | 'MEMBER';
+
+export interface Organization {
+  id: string;
+  slug: string;
+  name: string;
+  avatar_url?: string;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface OrganizationMember {
+  id: string;
+  organization_id: string;
+  user_id: string;
+  role: OrgRole;
+  created_at: number;
+}
+
+export interface OrganizationBilling {
+  id: string;
+  organization_id: string;
+  stripe_customer_id?: string;
   created_at: number;
   updated_at: number;
 }
@@ -940,6 +972,7 @@ export class DatabaseService {
       data: {
         id: pat.id,
         userId: pat.user_id,
+        organizationId: pat.organization_id,
         name: pat.name,
         token: pat.token,
         expiresAt: timestampToDate(pat.expires_at),
@@ -950,6 +983,7 @@ export class DatabaseService {
     return {
       id: result.id,
       user_id: result.userId,
+      organization_id: result.organizationId ?? undefined,
       name: result.name,
       token: result.token,
       expires_at: dateToTimestamp(result.expiresAt),
@@ -966,6 +1000,7 @@ export class DatabaseService {
     return {
       id: result.id,
       user_id: result.userId,
+      organization_id: result.organizationId ?? undefined,
       name: result.name,
       token: result.token,
       expires_at: dateToTimestamp(result.expiresAt),
@@ -984,6 +1019,7 @@ export class DatabaseService {
     return results.map((result) => ({
       id: result.id,
       user_id: result.userId,
+      organization_id: result.organizationId ?? undefined,
       name: result.name,
       token: result.token,
       expires_at: dateToTimestamp(result.expiresAt),
@@ -1017,6 +1053,7 @@ export class DatabaseService {
     return {
       id: result.id,
       user_id: result.userId,
+      organization_id: result.organizationId ?? undefined,
       name: result.name,
       token: result.token,
       expires_at: dateToTimestamp(result.expiresAt),
@@ -1039,6 +1076,224 @@ export class DatabaseService {
       },
     });
     return result.count;
+  }
+
+  // ============================================
+  // ORGANIZATION METHODS
+  // ============================================
+
+  async createOrganization(org: Omit<Organization, 'created_at' | 'updated_at'>): Promise<Organization> {
+    const result = await this.prisma.organization.create({
+      data: {
+        id: org.id,
+        slug: org.slug,
+        name: org.name,
+        avatarUrl: org.avatar_url,
+      },
+    });
+
+    return {
+      id: result.id,
+      slug: result.slug,
+      name: result.name,
+      avatar_url: result.avatarUrl ?? undefined,
+      created_at: result.createdAt.getTime(),
+      updated_at: result.updatedAt.getTime(),
+    };
+  }
+
+  async getOrganizationById(id: string): Promise<Organization | null> {
+    const result = await this.prisma.organization.findUnique({ where: { id } });
+    if (!result) return null;
+
+    return {
+      id: result.id,
+      slug: result.slug,
+      name: result.name,
+      avatar_url: result.avatarUrl ?? undefined,
+      created_at: result.createdAt.getTime(),
+      updated_at: result.updatedAt.getTime(),
+    };
+  }
+
+  async getOrganizationBySlug(slug: string): Promise<Organization | null> {
+    const result = await this.prisma.organization.findUnique({ where: { slug } });
+    if (!result) return null;
+
+    return {
+      id: result.id,
+      slug: result.slug,
+      name: result.name,
+      avatar_url: result.avatarUrl ?? undefined,
+      created_at: result.createdAt.getTime(),
+      updated_at: result.updatedAt.getTime(),
+    };
+  }
+
+  async getOrganizationsByUserId(userId: string): Promise<Array<Organization & { role: OrgRole }>> {
+    const results = await this.prisma.organizationMember.findMany({
+      where: { userId },
+      include: { organization: true },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    return results.map((result) => ({
+      id: result.organization.id,
+      slug: result.organization.slug,
+      name: result.organization.name,
+      avatar_url: result.organization.avatarUrl ?? undefined,
+      created_at: result.organization.createdAt.getTime(),
+      updated_at: result.organization.updatedAt.getTime(),
+      role: result.role as OrgRole,
+    }));
+  }
+
+  async updateOrganization(id: string, updates: Partial<Omit<Organization, 'id' | 'created_at' | 'updated_at'>>): Promise<void> {
+    const data: Record<string, unknown> = {};
+
+    if (updates.slug !== undefined) data.slug = updates.slug;
+    if (updates.name !== undefined) data.name = updates.name;
+    if (updates.avatar_url !== undefined) data.avatarUrl = updates.avatar_url;
+
+    await this.prisma.organization.update({
+      where: { id },
+      data,
+    });
+  }
+
+  async deleteOrganization(id: string): Promise<void> {
+    await this.prisma.organization.delete({ where: { id } });
+  }
+
+  // ============================================
+  // ORGANIZATION MEMBER METHODS
+  // ============================================
+
+  async createOrganizationMember(member: Omit<OrganizationMember, 'created_at'>): Promise<OrganizationMember> {
+    const result = await this.prisma.organizationMember.create({
+      data: {
+        id: member.id,
+        organizationId: member.organization_id,
+        userId: member.user_id,
+        role: member.role,
+      },
+    });
+
+    return {
+      id: result.id,
+      organization_id: result.organizationId,
+      user_id: result.userId,
+      role: result.role as OrgRole,
+      created_at: result.createdAt.getTime(),
+    };
+  }
+
+  async getOrganizationMember(organizationId: string, userId: string): Promise<OrganizationMember | null> {
+    const result = await this.prisma.organizationMember.findUnique({
+      where: {
+        organizationId_userId: { organizationId, userId },
+      },
+    });
+
+    if (!result) return null;
+
+    return {
+      id: result.id,
+      organization_id: result.organizationId,
+      user_id: result.userId,
+      role: result.role as OrgRole,
+      created_at: result.createdAt.getTime(),
+    };
+  }
+
+  async getOrganizationMembers(organizationId: string): Promise<OrganizationMember[]> {
+    const results = await this.prisma.organizationMember.findMany({
+      where: { organizationId },
+      orderBy: { createdAt: 'asc' },
+    });
+
+    return results.map((result) => ({
+      id: result.id,
+      organization_id: result.organizationId,
+      user_id: result.userId,
+      role: result.role as OrgRole,
+      created_at: result.createdAt.getTime(),
+    }));
+  }
+
+  async updateOrganizationMemberRole(organizationId: string, userId: string, role: OrgRole): Promise<void> {
+    await this.prisma.organizationMember.update({
+      where: {
+        organizationId_userId: { organizationId, userId },
+      },
+      data: { role },
+    });
+  }
+
+  async deleteOrganizationMember(organizationId: string, userId: string): Promise<void> {
+    await this.prisma.organizationMember.delete({
+      where: {
+        organizationId_userId: { organizationId, userId },
+      },
+    });
+  }
+
+  async isUserMemberOfOrganization(userId: string, organizationId: string): Promise<boolean> {
+    const member = await this.prisma.organizationMember.findUnique({
+      where: {
+        organizationId_userId: { organizationId, userId },
+      },
+    });
+    return member !== null;
+  }
+
+  // ============================================
+  // ORGANIZATION BILLING METHODS
+  // ============================================
+
+  async createOrganizationBilling(billing: Omit<OrganizationBilling, 'created_at' | 'updated_at'>): Promise<OrganizationBilling> {
+    const result = await this.prisma.organizationBilling.create({
+      data: {
+        id: billing.id,
+        organizationId: billing.organization_id,
+        stripeCustomerId: billing.stripe_customer_id,
+      },
+    });
+
+    return {
+      id: result.id,
+      organization_id: result.organizationId,
+      stripe_customer_id: result.stripeCustomerId ?? undefined,
+      created_at: result.createdAt.getTime(),
+      updated_at: result.updatedAt.getTime(),
+    };
+  }
+
+  async getOrganizationBillingByOrgId(organizationId: string): Promise<OrganizationBilling | null> {
+    const result = await this.prisma.organizationBilling.findUnique({
+      where: { organizationId },
+    });
+
+    if (!result) return null;
+
+    return {
+      id: result.id,
+      organization_id: result.organizationId,
+      stripe_customer_id: result.stripeCustomerId ?? undefined,
+      created_at: result.createdAt.getTime(),
+      updated_at: result.updatedAt.getTime(),
+    };
+  }
+
+  async updateOrganizationBilling(id: string, updates: Partial<Omit<OrganizationBilling, 'id' | 'organization_id' | 'created_at' | 'updated_at'>>): Promise<void> {
+    const data: Record<string, unknown> = {};
+
+    if (updates.stripe_customer_id !== undefined) data.stripeCustomerId = updates.stripe_customer_id;
+
+    await this.prisma.organizationBilling.update({
+      where: { id },
+      data,
+    });
   }
 
   // ============================================
