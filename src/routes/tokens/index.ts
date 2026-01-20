@@ -1,9 +1,9 @@
 import { Hono } from 'hono';
 import { z } from 'zod';
-import { dbService } from '../../services/db.service.js';
-import { TokenService } from '../../services/token.service.js';
-import { authMiddleware, requireAuthUser } from '../../middleware/auth.js';
-import { standardRateLimit } from '../../middleware/ratelimit.js';
+import { dbService } from '../../services/db.service';
+import { TokenService } from '../../services/token.service';
+import { authMiddleware, requireAuthUser } from '../../middleware/auth';
+import { standardRateLimit } from '../../middleware/ratelimit';
 
 const app = new Hono();
 const tokenService = new TokenService(dbService);
@@ -15,6 +15,7 @@ app.use('/', authMiddleware);
 // Schema for creating a token
 const createTokenSchema = z.object({
   name: z.string().min(1).max(100),
+  organizationId: z.string().optional(),
   expiresAt: z.number().optional(),
 });
 
@@ -28,16 +29,28 @@ app.post('/', standardRateLimit, async (c) => {
 
     // Validate request body
     const body = await c.req.json();
-    const { name, expiresAt } = createTokenSchema.parse(body);
+    const { name, organizationId, expiresAt } = createTokenSchema.parse(body);
+
+    // If organizationId provided, verify user is a member
+    if (organizationId) {
+      const isMember = await dbService.isUserMemberOfOrganization(authUser.userId, organizationId);
+      if (!isMember) {
+        return c.json({
+          error: 'You are not a member of this organization',
+          code: 'NOT_ORG_MEMBER',
+        }, 403);
+      }
+    }
 
     // Create token
-    const token = await tokenService.createToken(authUser.userId, name, expiresAt);
+    const token = await tokenService.createToken(authUser.userId, name, expiresAt, organizationId);
 
     return c.json({
       success: true,
       token: {
         id: token.id,
         name: token.name,
+        organizationId: token.organizationId,
         token: token.token, // Only returned on creation
         expiresAt: token.expiresAt ? new Date(token.expiresAt).toISOString() : null,
         createdAt: new Date(token.createdAt).toISOString(),
@@ -97,6 +110,7 @@ app.get('/', standardRateLimit, async (c) => {
       tokens: tokens.map((t) => ({
         id: t.id,
         name: t.name,
+        organizationId: t.organizationId,
         expiresAt: t.expiresAt ? new Date(t.expiresAt).toISOString() : null,
         lastUsedAt: t.lastUsedAt ? new Date(t.lastUsedAt).toISOString() : null,
         createdAt: new Date(t.createdAt).toISOString(),
@@ -168,6 +182,7 @@ app.post('/validate', standardRateLimit, async (c) => {
       valid: true,
       userId: result.userId,
       tokenId: result.tokenId,
+      organizationId: result.organizationId,
     });
   } catch (error) {
     console.error('Validate token error:', error);

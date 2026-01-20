@@ -129,6 +129,21 @@ app.post('/verify', strictRateLimit, async (c) => {
 
       // Update auth method last used
       await dbService.updateAuthMethodLastUsed(authMethod.id);
+
+      // Check if existing user has an organization, create one if not
+      const existingOrgs = await dbService.getOrganizationsByUserId(user.id);
+      if (existingOrgs.length === 0) {
+        const orgSlug = `user-${user.id.slice(0, 8)}`;
+        const shortAddress = address.slice(0, 6) + '...' + address.slice(-4);
+        await dbService.createDefaultOrganizationForUser({
+          orgId: nanoid(),
+          memberId: nanoid(),
+          billingId: nanoid(),
+          userId: user.id,
+          orgSlug,
+          orgName: `${shortAddress}'s Org`,
+        });
+      }
     } else {
       // Create new user
       user = await dbService.createUser({

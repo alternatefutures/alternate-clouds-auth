@@ -138,11 +138,13 @@ export class TokenService {
   async createToken(
     userId: string,
     name: string,
-    expiresAt?: number
+    expiresAt?: number,
+    organizationId?: string
   ): Promise<{
     token: string;
     id: string;
     name: string;
+    organizationId: string | null;
     expiresAt: number | null;
     createdAt: number;
   }> {
@@ -152,7 +154,7 @@ export class TokenService {
     // Trim name for storage consistency
     const trimmedName = name.trim();
 
-    return this.createTokenWithRetries(userId, trimmedName, expiresAt, 0);
+    return this.createTokenWithRetries(userId, trimmedName, expiresAt, organizationId, 0);
   }
 
   /**
@@ -162,11 +164,13 @@ export class TokenService {
     userId: string,
     name: string,
     expiresAt: number | undefined,
+    organizationId: string | undefined,
     retryCount: number
   ): Promise<{
     token: string;
     id: string;
     name: string;
+    organizationId: string | null;
     expiresAt: number | null;
     createdAt: number;
   }> {
@@ -217,13 +221,14 @@ export class TokenService {
 
     if (existing) {
       // Token collision detected - retry
-      return this.createTokenWithRetries(userId, name, expiresAt, retryCount + 1);
+      return this.createTokenWithRetries(userId, name, expiresAt, organizationId, retryCount + 1);
     }
 
     // Create token in database
     const tokenRecord = await this.db.createPersonalAccessToken({
       id: nanoid(),
       user_id: userId,
+      organization_id: organizationId,
       name,
       token,
       expires_at: expiresAt,
@@ -233,6 +238,7 @@ export class TokenService {
       token: tokenRecord.token,
       id: tokenRecord.id,
       name: tokenRecord.name,
+      organizationId: tokenRecord.organization_id ?? null,
       expiresAt: tokenRecord.expires_at ?? null,
       createdAt: tokenRecord.created_at,
     };
@@ -261,7 +267,7 @@ export class TokenService {
    * Validate a token and return the associated user
    * Also updates lastUsedAt timestamp
    */
-  async validateToken(token: string): Promise<{ userId: string; tokenId: string } | null> {
+  async validateToken(token: string): Promise<{ userId: string; tokenId: string; organizationId?: string } | null> {
     const tokenRecord = await this.db.getPersonalAccessTokenByToken(token);
 
     if (!tokenRecord) {
@@ -282,6 +288,7 @@ export class TokenService {
     return {
       userId: tokenRecord.user_id,
       tokenId: tokenRecord.id,
+      organizationId: tokenRecord.organization_id,
     };
   }
 
@@ -292,6 +299,7 @@ export class TokenService {
     Array<{
       id: string;
       name: string;
+      organizationId: string | null;
       expiresAt: number | null;
       lastUsedAt: number | null;
       createdAt: number;
@@ -302,6 +310,7 @@ export class TokenService {
     return tokens.map((t) => ({
       id: t.id,
       name: t.name,
+      organizationId: t.organization_id ?? null,
       expiresAt: t.expires_at ?? null,
       lastUsedAt: t.last_used_at ?? null,
       createdAt: t.created_at,

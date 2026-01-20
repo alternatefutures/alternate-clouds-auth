@@ -105,7 +105,7 @@ app.post('/logout', authMiddleware, async (c) => {
 
 /**
  * GET /auth/me
- * Get current authenticated user
+ * Get current authenticated user with organizations
  */
 app.get('/me', authMiddleware, async (c) => {
   try {
@@ -117,6 +117,9 @@ app.get('/me', authMiddleware, async (c) => {
     if (!user) {
       return c.json({ error: 'User not found' }, 404);
     }
+
+    // Get user's organizations
+    const organizations = await dbService.getOrganizationsByUserId(authUser.userId);
 
     return c.json({
       user: {
@@ -130,6 +133,13 @@ app.get('/me', authMiddleware, async (c) => {
         createdAt: new Date(user.created_at).toISOString(),
         lastLoginAt: user.last_login_at ? new Date(user.last_login_at).toISOString() : null,
       },
+      organizations: organizations.map((org) => ({
+        id: org.id,
+        slug: org.slug,
+        name: org.name,
+        avatarUrl: org.avatar_url,
+        role: org.role,
+      })),
     });
   } catch (error) {
     console.error('Get user error:', error);

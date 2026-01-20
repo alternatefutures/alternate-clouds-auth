@@ -123,6 +123,21 @@ app.get('/callback/:provider', async (c) => {
         oauth_access_token: accessToken,
         last_used_at: Date.now(),
       });
+
+      // Check if existing user has an organization, create one if not
+      const existingOrgs = await dbService.getOrganizationsByUserId(user.id);
+      if (existingOrgs.length === 0) {
+        const orgSlug = `user-${user.id.slice(0, 8)}`;
+        const orgName = oauthUserInfo.name || oauthUserInfo.email?.split('@')[0] || 'My Organization';
+        await dbService.createDefaultOrganizationForUser({
+          orgId: nanoid(),
+          memberId: nanoid(),
+          billingId: nanoid(),
+          userId: user.id,
+          orgSlug,
+          orgName: `${orgName}'s Org`,
+        });
+      }
     } else {
       // Create new user
       user = await dbService.createUser({

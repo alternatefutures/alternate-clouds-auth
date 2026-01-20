@@ -8,6 +8,7 @@ import authRoutes from './routes/auth';
 import accountRoutes from './routes/account';
 import tokensRoutes from './routes/tokens';
 import billingRoutes from './routes/billing';
+import organizationsRoutes from './routes/organizations';
 
 // Initialize secrets before anything else
 await secretsService.initialize();
@@ -157,6 +158,9 @@ app.route('/tokens', tokensRoutes);
 
 // Mount billing routes
 app.route('/billing', billingRoutes);
+
+// Mount organizations routes
+app.route('/organizations', organizationsRoutes);
 
 // 404 handler
 app.notFound((c) => {
