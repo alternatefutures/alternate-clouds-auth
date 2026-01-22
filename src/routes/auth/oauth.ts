@@ -23,6 +23,22 @@ setInterval(() => {
 }, 60 * 1000); // Run every minute
 
 /**
+ * GET /auth/oauth/providers
+ * Get list of configured OAuth providers
+ * NOTE: Must be defined BEFORE /:provider to avoid being caught by wildcard
+ */
+app.get('/providers', (c) => {
+  const providers = oauthService.getConfiguredProviders();
+
+  return c.json({
+    providers: providers.map((name) => ({
+      name,
+      authUrl: `/auth/oauth/${name}`,
+    })),
+  });
+});
+
+/**
  * GET /auth/oauth/:provider
  * Initiate OAuth flow with provider
  */
@@ -204,21 +220,6 @@ app.get('/callback/:provider', async (c) => {
     console.error('OAuth callback error:', error);
     return c.json({ error: 'OAuth authentication failed' }, 500);
   }
-});
-
-/**
- * GET /auth/oauth/providers
- * Get list of configured OAuth providers
- */
-app.get('/providers', (c) => {
-  const providers = oauthService.getConfiguredProviders();
-
-  return c.json({
-    providers: providers.map((name) => ({
-      name,
-      authUrl: `/auth/oauth/${name}`,
-    })),
-  });
 });
 
 export default app;

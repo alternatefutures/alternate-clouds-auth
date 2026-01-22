@@ -179,7 +179,7 @@ app.onError((err, c) => {
   );
 });
 
-const port = parseInt(process.env.PORT || '3000');
+const port = parseInt(process.env.PORT || '1601');
 
 console.log(`🚀 Alternate Futures Auth Service starting on port ${port}`);
 

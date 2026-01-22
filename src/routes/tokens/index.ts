@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import { z } from 'zod';
 import { dbService } from '../../services/db.service';
 import { TokenService } from '../../services/token.service';
+import { jwtService } from '../../services/jwt.service';
 import { authMiddleware, requireAuthUser } from '../../middleware/auth';
 import { standardRateLimit } from '../../middleware/ratelimit';
 
@@ -168,22 +169,35 @@ app.post('/validate', standardRateLimit, async (c) => {
     const body = await c.req.json();
     const { token } = validateTokenSchema.parse(body);
 
-    // Validate token
-    const result = await tokenService.validateToken(token);
+    // First, try to validate as a Personal Access Token (PAT)
+    const patResult = await tokenService.validateToken(token);
 
-    if (!result) {
+    if (patResult) {
+      return c.json({
+        valid: true,
+        userId: patResult.userId,
+        tokenId: patResult.tokenId,
+        organizationId: patResult.organizationId,
+      });
+    }
+
+    // If PAT validation failed, try JWT access token validation
+    try {
+      const jwtPayload = jwtService.verifyAccessToken(token);
+      
+      return c.json({
+        valid: true,
+        userId: jwtPayload.userId,
+        tokenId: jwtPayload.sessionId, // Use sessionId as tokenId for JWT
+        // JWT tokens don't have organizationId embedded
+      });
+    } catch {
+      // JWT validation also failed
       return c.json({
         valid: false,
         error: 'Invalid or expired token',
       }, 401);
     }
-
-    return c.json({
-      valid: true,
-      userId: result.userId,
-      tokenId: result.tokenId,
-      organizationId: result.organizationId,
-    });
   } catch (error) {
     console.error('Validate token error:', error);
 
