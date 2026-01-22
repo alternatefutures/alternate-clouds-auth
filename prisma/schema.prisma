@@ -255,7 +255,7 @@ model SubscriptionPlan {
 
 model Subscription {
   id                   String    @id @default(uuid())
-  customerId           String?   @map("customer_id")
+  customerId           String    @map("customer_id")
   orgBillingId         String?   @map("org_billing_id")
   planId               String    @map("plan_id")
   status               String    // ACTIVE, CANCELED, PAST_DUE, UNPAID, TRIALING
@@ -269,7 +269,7 @@ model Subscription {
   createdAt            DateTime  @default(now()) @map("created_at")
   updatedAt            DateTime  @updatedAt @map("updated_at")
 
-  customer   BillingCustomer?     @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  customer   BillingCustomer      @relation(fields: [customerId], references: [id], onDelete: Cascade)
   orgBilling OrganizationBilling? @relation(fields: [orgBillingId], references: [id], onDelete: Cascade)
   plan       SubscriptionPlan     @relation(fields: [planId], references: [id])
   invoices   Invoice[]
@@ -284,7 +284,7 @@ model Subscription {
 
 model Invoice {
   id               String    @id @default(uuid())
-  customerId       String?   @map("customer_id")
+  customerId       String    @map("customer_id")
   orgBillingId     String?   @map("org_billing_id")
   subscriptionId   String?   @map("subscription_id")
   invoiceNumber    String    @unique @map("invoice_number")
@@ -304,7 +304,7 @@ model Invoice {
   createdAt        DateTime  @default(now()) @map("created_at")
   updatedAt        DateTime  @updatedAt @map("updated_at")
 
-  customer     BillingCustomer?     @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  customer     BillingCustomer      @relation(fields: [customerId], references: [id], onDelete: Cascade)
   orgBilling   OrganizationBilling? @relation(fields: [orgBillingId], references: [id], onDelete: Cascade)
   subscription Subscription?        @relation(fields: [subscriptionId], references: [id], onDelete: SetNull)
   lineItems    InvoiceLineItem[]
@@ -363,7 +363,7 @@ model Payment {
 
 model UsageRecord {
   id             String   @id @default(uuid())
-  customerId     String?  @map("customer_id")
+  customerId     String   @map("customer_id")
   orgBillingId   String?  @map("org_billing_id")
   subscriptionId String?  @map("subscription_id")
   metricType     String   @map("metric_type") // storage, bandwidth, compute, requests
@@ -375,7 +375,7 @@ model UsageRecord {
   recordedAt     DateTime @map("recorded_at")
   createdAt      DateTime @default(now()) @map("created_at")
 
-  customer     BillingCustomer?     @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  customer     BillingCustomer      @relation(fields: [customerId], references: [id], onDelete: Cascade)
   orgBilling   OrganizationBilling? @relation(fields: [orgBillingId], references: [id], onDelete: Cascade)
   subscription Subscription?        @relation(fields: [subscriptionId], references: [id], onDelete: SetNull)
 
@@ -387,7 +387,7 @@ model UsageRecord {
 
 model UsageAggregate {
   id             String   @id @default(uuid())
-  customerId     String?  @map("customer_id")
+  customerId     String   @map("customer_id")
   orgBillingId   String?  @map("org_billing_id")
   subscriptionId String?  @map("subscription_id")
   metricType     String   @map("metric_type") // storage, bandwidth, compute, requests
@@ -397,7 +397,7 @@ model UsageAggregate {
   periodEnd      DateTime @map("period_end")
   updatedAt      DateTime @updatedAt @map("updated_at")
 
-  customer     BillingCustomer?     @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  customer     BillingCustomer      @relation(fields: [customerId], references: [id], onDelete: Cascade)
   orgBilling   OrganizationBilling? @relation(fields: [orgBillingId], references: [id], onDelete: Cascade)
   subscription Subscription?        @relation(fields: [subscriptionId], references: [id], onDelete: SetNull)
 
