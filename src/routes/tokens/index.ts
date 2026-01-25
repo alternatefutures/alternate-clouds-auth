@@ -5,6 +5,7 @@ import { TokenService } from '../../services/token.service';
 import { jwtService } from '../../services/jwt.service';
 import { authMiddleware, requireAuthUser } from '../../middleware/auth';
 import { standardRateLimit } from '../../middleware/ratelimit';
+import { timingSafeCompare } from '../../utils/crypto';
 
 const app = new Hono();
 const tokenService = new TokenService(dbService);
@@ -165,6 +166,16 @@ const validateTokenSchema = z.object({
 
 app.post('/validate', standardRateLimit, async (c) => {
   try {
+    // Optional hardening: require an internal shared secret for introspection
+    const introspectionSecret = process.env.AUTH_INTROSPECTION_SECRET;
+    if (introspectionSecret) {
+      const provided = c.req.header('x-af-introspection-secret');
+      // SECURITY: Use timing-safe comparison to prevent timing attacks
+      if (!provided || !timingSafeCompare(provided, introspectionSecret)) {
+        return c.json({ valid: false, error: 'Unauthorized' }, 401);
+      }
+    }
+
     // Validate request body
     const body = await c.req.json();
     const { token } = validateTokenSchema.parse(body);
@@ -173,11 +184,16 @@ app.post('/validate', standardRateLimit, async (c) => {
     const patResult = await tokenService.validateToken(token);
 
     if (patResult) {
+      // Enrich with basic user profile (helps internal consumers like service-cloud-api)
+      const user = await dbService.getUserById(patResult.userId);
       return c.json({
         valid: true,
         userId: patResult.userId,
         tokenId: patResult.tokenId,
         organizationId: patResult.organizationId,
+        email: user?.email ?? null,
+        displayName: user?.display_name ?? null,
+        avatarUrl: user?.avatar_url ?? null,
       });
     }
 

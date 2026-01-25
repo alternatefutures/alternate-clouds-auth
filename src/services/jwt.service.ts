@@ -33,20 +33,7 @@ export class JWTService {
    * Generate an access token (short-lived)
    */
   generateAccessToken(userId: string, email?: string): string {
-    const sessionId = nanoid();
-
-    const payload: TokenPayload = {
-      userId,
-      email,
-      sessionId,
-      type: 'access',
-    };
-
-    return jwt.sign(payload, this.accessTokenSecret, {
-      expiresIn: this.expiryConfig.accessTokenExpiry as string,
-      issuer: 'alternatefutures-auth',
-      audience: 'alternatefutures-app',
-    } as SignOptions);
+    return this.generateAccessTokenForSession(userId, nanoid(), email);
   }
 
   /**
@@ -76,20 +63,7 @@ export class JWTService {
   } {
     const sessionId = nanoid();
 
-    const accessToken = jwt.sign(
-      {
-        userId,
-        email,
-        sessionId,
-        type: 'access',
-      } as TokenPayload,
-      this.accessTokenSecret,
-      {
-        expiresIn: this.expiryConfig.accessTokenExpiry as string,
-        issuer: 'alternatefutures-auth',
-        audience: 'alternatefutures-app',
-      } as SignOptions
-    );
+    const accessToken = this.generateAccessTokenForSession(userId, sessionId, email);
 
     const refreshToken = jwt.sign(
       {
@@ -110,6 +84,25 @@ export class JWTService {
       refreshToken,
       sessionId,
     };
+  }
+
+  /**
+   * Generate an access token for an existing session
+   * (used when refreshing tokens so sessionId remains stable)
+   */
+  generateAccessTokenForSession(userId: string, sessionId: string, email?: string): string {
+    const payload: TokenPayload = {
+      userId,
+      email,
+      sessionId,
+      type: 'access',
+    };
+
+    return jwt.sign(payload, this.accessTokenSecret, {
+      expiresIn: this.expiryConfig.accessTokenExpiry as string,
+      issuer: 'alternatefutures-auth',
+      audience: 'alternatefutures-app',
+    } as SignOptions);
   }
 
   /**

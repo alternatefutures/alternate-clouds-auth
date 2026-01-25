@@ -44,12 +44,21 @@ app.post('/refresh', standardRateLimit, async (c) => {
       return c.json({ error: 'User not found' }, 404);
     }
 
-    // Generate new access token (same session)
-    const accessToken = jwtService.generateAccessToken(user.id, user.email);
+    // Rotate refresh token (one-time use) + issue new access token for same session
+    const newAccessToken = jwtService.generateAccessTokenForSession(
+      user.id,
+      payload.sessionId,
+      user.email
+    );
+    const newRefreshToken = jwtService.generateRefreshToken(user.id, payload.sessionId);
+
+    const newExpiresAt = Date.now() + 7 * 24 * 60 * 60 * 1000; // 7 days
+    await dbService.rotateSessionRefreshToken(payload.sessionId, newRefreshToken, newExpiresAt);
 
     return c.json({
       success: true,
-      accessToken,
+      accessToken: newAccessToken,
+      refreshToken: newRefreshToken,
       user: {
         id: user.id,
         email: user.email,

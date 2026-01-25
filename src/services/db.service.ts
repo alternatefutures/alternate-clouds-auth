@@ -1,9 +1,34 @@
 /**
  * Database service for interacting with PostgreSQL via Prisma
  * Migrated from SQLite (better-sqlite3) to PostgreSQL for shared database with service-cloud-api
+ * 
+ * SECURITY: Sensitive tokens (refresh tokens, etc.) are hashed before storage
  */
 
 import { PrismaClient } from '@prisma/client';
+import { createHash, timingSafeEqual } from 'node:crypto';
+
+/**
+ * Hash a token/secret using SHA-256 for storage at rest
+ */
+function hashTokenForStorage(token: string): string {
+  return createHash('sha256').update(token, 'utf8').digest('hex');
+}
+
+/**
+ * Verify a token against its hash using timing-safe comparison
+ */
+function verifyTokenHashInternal(token: string, hash: string): boolean {
+  const tokenHash = hashTokenForStorage(token);
+  if (tokenHash.length !== hash.length) {
+    return false;
+  }
+  try {
+    return timingSafeEqual(Buffer.from(tokenHash, 'utf8'), Buffer.from(hash, 'utf8'));
+  } catch {
+    return false;
+  }
+}
 
 // ============================================
 // LEGACY INTERFACES (kept for API compatibility)
@@ -53,7 +78,9 @@ export interface Session {
 
 export interface VerificationCode {
   id: string;
-  code_type: 'email' | 'sms' | 'mfa';
+  // NOTE: Prisma stores this as a string; we keep a union for known types,
+  // but may also use additional internal types (e.g. oauth exchange / cli sessions).
+  code_type: 'email' | 'sms' | 'mfa' | 'oauth_exchange' | 'oauth_state' | 'cli_session';
   identifier: string;
   code: string;
   expires_at: number;
@@ -556,7 +583,7 @@ export class DatabaseService {
 
     return {
       id: result.id,
-      code_type: result.codeType as 'email' | 'sms' | 'mfa',
+      code_type: result.codeType as VerificationCode['code_type'],
       identifier: result.identifier,
       code: result.code,
       expires_at: result.expiresAt.getTime(),
@@ -583,7 +610,7 @@ export class DatabaseService {
 
     return {
       id: result.id,
-      code_type: result.codeType as 'email' | 'sms' | 'mfa',
+      code_type: result.codeType as VerificationCode['code_type'],
       identifier: result.identifier,
       code: result.code,
       expires_at: result.expiresAt.getTime(),
@@ -615,16 +642,28 @@ export class DatabaseService {
     });
   }
 
+  async updateVerificationCodeValue(id: string, code: string): Promise<void> {
+    await this.prisma.verificationCode.update({
+      where: { id },
+      data: {
+        code,
+      },
+    });
+  }
+
   // ============================================
   // SESSION METHODS
   // ============================================
 
   async createSession(session: Omit<Session, 'created_at' | 'last_activity_at'>): Promise<Session> {
+    // SECURITY: Hash refresh token before storage
+    const refreshTokenHash = hashTokenForStorage(session.refresh_token);
+    
     const result = await this.prisma.authSession.create({
       data: {
         id: session.id,
         userId: session.user_id,
-        refreshToken: session.refresh_token,
+        refreshToken: refreshTokenHash, // Store hash, not plaintext
         userAgent: session.user_agent,
         ipAddress: session.ip_address,
         deviceId: session.device_id,
@@ -637,7 +676,7 @@ export class DatabaseService {
     return {
       id: result.id,
       user_id: result.userId,
-      refresh_token: result.refreshToken,
+      refresh_token: result.refreshToken, // Returns hash (caller should keep original)
       user_agent: result.userAgent ?? undefined,
       ip_address: result.ipAddress ?? undefined,
       device_id: result.deviceId ?? undefined,
@@ -650,9 +689,12 @@ export class DatabaseService {
   }
 
   async getSessionByRefreshToken(refreshToken: string): Promise<Session | null> {
+    // SECURITY: Hash the token to look up by stored hash
+    const refreshTokenHash = hashTokenForStorage(refreshToken);
+    
     const result = await this.prisma.authSession.findFirst({
       where: {
-        refreshToken,
+        refreshToken: refreshTokenHash,
         revoked: false,
       },
     });
@@ -699,6 +741,20 @@ export class DatabaseService {
       data: {
         revoked: true,
         revokedAt: new Date(),
+      },
+    });
+  }
+
+  async rotateSessionRefreshToken(sessionId: string, newRefreshToken: string, newExpiresAt: number): Promise<void> {
+    // SECURITY: Hash the new refresh token before storage
+    const refreshTokenHash = hashTokenForStorage(newRefreshToken);
+    
+    await this.prisma.authSession.update({
+      where: { id: sessionId },
+      data: {
+        refreshToken: refreshTokenHash,
+        expiresAt: new Date(newExpiresAt),
+        lastActivityAt: new Date(),
       },
     });
   }
