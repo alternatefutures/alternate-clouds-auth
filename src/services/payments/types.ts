@@ -66,8 +66,10 @@ export interface ExternalPaymentIntent {
   id: string;
   status: 'requires_payment_method' | 'requires_confirmation' | 'requires_action' | 'processing' | 'succeeded' | 'canceled' | 'failed';
   amount: number;
+  amountReceived?: number;
   currency: string;
   clientSecret?: string;
+  metadata?: Record<string, string>;
   // For crypto payments
   depositAddress?: string;
   chainId?: number;

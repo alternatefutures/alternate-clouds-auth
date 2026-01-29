@@ -33,6 +33,11 @@ model AuthUser {
   connectedAccounts     ConnectedAccount[]
   organizationMembers   OrganizationMember[]
 
+  // Usage wallet relations
+  usageLedgerEntries    OrganizationUsageLedger[]
+  usageLogEntries       OrganizationUsageLog[]
+  usageCostsPrivate     OrganizationUsageCostsPrivate[]
+
   @@map("auth_users")
 }
 
@@ -187,6 +192,12 @@ model OrganizationBilling {
   invoices        Invoice[]
   usageRecords    UsageRecord[]
   usageAggregates UsageAggregate[]
+
+  // Usage wallet relations
+  usageBalance      OrganizationUsageBalance?
+  usageLedger       OrganizationUsageLedger[]
+  usageLog          OrganizationUsageLog[]
+  usageCostsPrivate OrganizationUsageCostsPrivate[]
 
   @@index([stripeCustomerId])
   @@map("organization_billing")
@@ -507,4 +518,100 @@ model PlatformFee {
   @@index([connectedAccountId])
   @@index([paymentId])
   @@map("auth_platform_fees")
+}
+
+// ============================================
+// USAGE WALLET MODELS (USD cents)
+// ============================================
+
+enum UsageLedgerDirection {
+  CREDIT
+  DEBIT
+}
+
+model OrganizationUsageBalance {
+  id           String   @id @default(uuid())
+  orgBillingId String   @unique @map("org_billing_id")
+  balanceCents Int      @default(0) @map("balance_cents") // USD cents (e.g., 2500 = $25.00)
+  updatedAt    DateTime @updatedAt @map("updated_at")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  orgBilling OrganizationBilling @relation(fields: [orgBillingId], references: [id], onDelete: Cascade)
+
+  @@index([orgBillingId])
+  @@map("organization_usage_balance")
+}
+
+model OrganizationUsageLedger {
+  id             String               @id @default(uuid())
+  orgBillingId   String               @map("org_billing_id")
+  actorUserId    String?              @map("actor_user_id") // who initiated (optional)
+  direction      UsageLedgerDirection
+  amountCents    Int                  @map("amount_cents") // USD cents (positive integer)
+  reason         String               @map("reason") // topup, ai_inference, compute, storage, bandwidth, etc.
+  idempotencyKey String               @unique @map("idempotency_key")
+  metadata       Json                 @default("{}") @map("metadata")
+  createdAt      DateTime             @default(now()) @map("created_at")
+
+  orgBilling OrganizationBilling @relation(fields: [orgBillingId], references: [id], onDelete: Cascade)
+  actorUser  AuthUser?           @relation(fields: [actorUserId], references: [id], onDelete: SetNull)
+
+  @@index([orgBillingId, createdAt])
+  @@index([actorUserId])
+  @@index([reason])
+  @@map("organization_usage_ledger")
+}
+
+model OrganizationUsageLog {
+  id           String   @id @default(uuid())
+  orgBillingId String   @map("org_billing_id")
+  userId       String   @map("user_id")
+
+  serviceType  String   @map("service_type") // ai_inference, compute, storage, bandwidth, etc.
+  provider     String   @map("provider") // openai, anthropic, aws, gcp, internal, etc.
+  resource     String   @map("resource") // e.g. "chat/completions", "gpu-h100", "s3-storage"
+  model        String?  @map("model") // for AI: gpt-4o, claude-3, etc.
+
+  usdCostRaw   Float    @map("usd_cost_raw") // raw provider/compute cost in USD
+  marginRate   Float    @map("margin_rate") // applied margin (e.g., 0.5 = 50%)
+  usdCharged   Float    @map("usd_charged") // final amount charged = usdCostRaw / (1 - marginRate)
+
+  requestId    String?  @map("request_id") // stable request id if available
+  metadata     Json     @default("{}") @map("metadata")
+
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  orgBilling OrganizationBilling @relation(fields: [orgBillingId], references: [id], onDelete: Cascade)
+  user       AuthUser            @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([orgBillingId, createdAt])
+  @@index([userId, createdAt])
+  @@index([serviceType])
+  @@index([provider])
+  @@map("organization_usage_log")
+}
+
+model OrganizationUsageCostsPrivate {
+  id            String   @id @default(uuid())
+  orgBillingId  String   @map("org_billing_id")
+  userId        String   @map("user_id")
+
+  serviceType   String   @map("service_type")
+  provider      String   @map("provider")
+  resource      String   @map("resource")
+  model         String?  @map("model")
+
+  usdCostRaw    Float    @map("usd_cost_raw") // what we pay the provider
+  usdCharged    Float    @map("usd_charged") // what user pays (with margin)
+  marginRate    Float    @map("margin_rate")
+  marginUsd     Float    @map("margin_usd") // usdCharged - usdCostRaw (our profit)
+
+  metadata      Json     @default("{}") @map("metadata")
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  orgBilling OrganizationBilling @relation(fields: [orgBillingId], references: [id], onDelete: Cascade)
+  user       AuthUser            @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([orgBillingId, createdAt])
+  @@map("organization_usage_costs_private")
 }

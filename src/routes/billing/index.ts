@@ -12,6 +12,7 @@ import usageRoutes from './usage';
 import paymentsRoutes from './payments';
 import webhooksRoutes from './webhooks';
 import connectRoutes from './connect';
+import creditsRoutes from './credits';
 
 const app = new Hono();
 
@@ -24,5 +25,6 @@ app.route('/usage', usageRoutes);
 app.route('/payments', paymentsRoutes);
 app.route('/webhooks', webhooksRoutes);
 app.route('/connect', connectRoutes);
+app.route('/credits', creditsRoutes);
 
 export default app;

@@ -372,6 +372,67 @@ export interface PlatformFee {
 }
 
 // ============================================
+// USAGE WALLET INTERFACES (USD cents)
+// ============================================
+
+export type UsageLedgerDirection = 'CREDIT' | 'DEBIT';
+
+export interface OrganizationUsageBalance {
+  id: string;
+  org_billing_id: string;
+  balance_cents: number; // USD cents (e.g., 2500 = $25.00)
+  updated_at: number;
+  created_at: number;
+}
+
+export interface OrganizationUsageLedger {
+  id: string;
+  org_billing_id: string;
+  actor_user_id?: string;
+  direction: UsageLedgerDirection;
+  amount_cents: number; // USD cents
+  reason: string;
+  idempotency_key: string;
+  metadata: Record<string, unknown>;
+  created_at: number;
+}
+
+export interface OrganizationUsageLog {
+  id: string;
+  org_billing_id: string;
+  user_id: string;
+  service_type: string; // ai_inference, compute, storage, bandwidth, etc.
+  provider: string;
+  resource: string;
+  model?: string;
+  usd_cost_raw: number;
+  margin_rate: number;
+  usd_charged: number;
+  request_id?: string;
+  metadata: Record<string, unknown>;
+  created_at: number;
+}
+
+export interface OrganizationUsageCostsPrivate {
+  id: string;
+  org_billing_id: string;
+  user_id: string;
+  service_type: string;
+  provider: string;
+  resource: string;
+  model?: string;
+  usd_cost_raw: number;
+  usd_charged: number;
+  margin_rate: number;
+  margin_usd: number;
+  metadata: Record<string, unknown>;
+  created_at: number;
+}
+
+// Usage billing constants (configurable via env)
+export const USAGE_MARGIN_RATE = parseFloat(process.env.USAGE_MARGIN_RATE || '0.5'); // 50% margin
+
+// ============================================
 // HELPER FUNCTIONS
 // ============================================
 
@@ -1418,6 +1479,14 @@ export class DatabaseService {
     const trialEndsAt = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000); // 30 days
     const periodEnd = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
 
+    // Look up the STARTER plan for trial
+    const starterPlan = await this.prisma.subscriptionPlan.findUnique({
+      where: { name: 'STARTER' },
+    });
+    if (!starterPlan) {
+      throw new Error('STARTER plan not found. Please run the seed script.');
+    }
+
     // Check if user already has a BillingCustomer (edge case: existing user adding via new auth method)
     const existingBillingCustomer = await this.prisma.billingCustomer.findUnique({
       where: { userId },
@@ -1479,7 +1548,7 @@ export class DatabaseService {
           id: subscriptionId,
           customerId: actualBillingCustomerId, // Use existing or new BillingCustomer
           orgBillingId: billingId, // Optional FK to OrganizationBilling
-          planId: 'plan_starter',
+          planId: starterPlan.id, // Use actual plan ID from database
           status: 'TRIALING',
           seats: 1,
           currentPeriodStart: now,
@@ -3016,6 +3085,392 @@ export class DatabaseService {
       stripe_fee_id: result.stripeFeeId ?? undefined,
       created_at: result.createdAt.getTime(),
     }));
+  }
+
+  // ============================================
+  // USAGE WALLET METHODS (USD cents)
+  // ============================================
+
+  /**
+   * Get or create organization usage balance
+   * Creates a balance row with $0.00 if it doesn't exist
+   */
+  async getOrCreateOrgUsageBalance(orgBillingId: string): Promise<OrganizationUsageBalance> {
+    const existing = await this.prisma.organizationUsageBalance.findUnique({
+      where: { orgBillingId },
+    });
+
+    if (existing) {
+      return {
+        id: existing.id,
+        org_billing_id: existing.orgBillingId,
+        balance_cents: existing.balanceCents,
+        updated_at: existing.updatedAt.getTime(),
+        created_at: existing.createdAt.getTime(),
+      };
+    }
+
+    // Create new balance with $0.00
+    const result = await this.prisma.organizationUsageBalance.create({
+      data: {
+        orgBillingId,
+        balanceCents: 0,
+      },
+    });
+
+    return {
+      id: result.id,
+      org_billing_id: result.orgBillingId,
+      balance_cents: result.balanceCents,
+      updated_at: result.updatedAt.getTime(),
+      created_at: result.createdAt.getTime(),
+    };
+  }
+
+  /**
+   * Get organization usage balance
+   */
+  async getOrgUsageBalance(orgBillingId: string): Promise<OrganizationUsageBalance | null> {
+    const result = await this.prisma.organizationUsageBalance.findUnique({
+      where: { orgBillingId },
+    });
+
+    if (!result) return null;
+
+    return {
+      id: result.id,
+      org_billing_id: result.orgBillingId,
+      balance_cents: result.balanceCents,
+      updated_at: result.updatedAt.getTime(),
+      created_at: result.createdAt.getTime(),
+    };
+  }
+
+  /**
+   * Credit org balance idempotently (add funds)
+   * If idempotency key already exists, returns current balance (no-op)
+   * @param amountCents - Amount to add in USD cents (e.g., 2500 = $25.00)
+   */
+  async creditOrgBalanceIdempotent(args: {
+    orgBillingId: string;
+    actorUserId?: string;
+    amountCents: number;
+    reason: string;
+    idempotencyKey: string;
+    metadata?: Record<string, unknown>;
+  }): Promise<{ balanceCents: number; alreadyProcessed: boolean }> {
+    const { orgBillingId, actorUserId, amountCents, reason, idempotencyKey, metadata = {} } = args;
+
+    // Check if idempotency key already exists
+    const existingLedger = await this.prisma.organizationUsageLedger.findUnique({
+      where: { idempotencyKey },
+    });
+
+    if (existingLedger) {
+      // Already processed - return current balance
+      const balance = await this.getOrCreateOrgUsageBalance(orgBillingId);
+      return { balanceCents: balance.balance_cents, alreadyProcessed: true };
+    }
+
+    // Use transaction to ensure atomicity
+    const result = await this.prisma.$transaction(async (tx) => {
+      // Insert ledger entry
+      await tx.organizationUsageLedger.create({
+        data: {
+          orgBillingId,
+          actorUserId: actorUserId ?? null,
+          direction: 'CREDIT',
+          amountCents,
+          reason,
+          idempotencyKey,
+          metadata: metadata as object,
+        },
+      });
+
+      // Upsert balance (create if not exists, otherwise increment)
+      const updatedBalance = await tx.organizationUsageBalance.upsert({
+        where: { orgBillingId },
+        create: {
+          orgBillingId,
+          balanceCents: amountCents,
+        },
+        update: {
+          balanceCents: { increment: amountCents },
+        },
+      });
+
+      return updatedBalance.balanceCents;
+    });
+
+    return { balanceCents: result, alreadyProcessed: false };
+  }
+
+  /**
+   * Debit org balance atomically (charge for usage)
+   * Fails if insufficient balance
+   * @param amountCents - Amount to deduct in USD cents (e.g., 150 = $1.50)
+   */
+  async debitOrgBalanceAtomic(args: {
+    orgBillingId: string;
+    actorUserId?: string;
+    amountCents: number;
+    reason: string;
+    idempotencyKey: string;
+    metadata?: Record<string, unknown>;
+  }): Promise<{ balanceCents: number; alreadyProcessed: boolean }> {
+    const { orgBillingId, actorUserId, amountCents, reason, idempotencyKey, metadata = {} } = args;
+
+    // Check if idempotency key already exists
+    const existingLedger = await this.prisma.organizationUsageLedger.findUnique({
+      where: { idempotencyKey },
+    });
+
+    if (existingLedger) {
+      // Already processed - return current balance
+      const balance = await this.getOrCreateOrgUsageBalance(orgBillingId);
+      return { balanceCents: balance.balance_cents, alreadyProcessed: true };
+    }
+
+    // Use transaction to ensure atomicity with guard
+    const result = await this.prisma.$transaction(async (tx) => {
+      // Insert ledger entry first
+      await tx.organizationUsageLedger.create({
+        data: {
+          orgBillingId,
+          actorUserId: actorUserId ?? null,
+          direction: 'DEBIT',
+          amountCents,
+          reason,
+          idempotencyKey,
+          metadata: metadata as object,
+        },
+      });
+
+      // Update balance with guard (balance >= amount)
+      const updateResult = await tx.organizationUsageBalance.updateMany({
+        where: {
+          orgBillingId,
+          balanceCents: { gte: amountCents },
+        },
+        data: {
+          balanceCents: { decrement: amountCents },
+        },
+      });
+
+      if (updateResult.count === 0) {
+        // Guard failed - insufficient balance or balance row missing
+        throw new Error('INSUFFICIENT_BALANCE');
+      }
+
+      // Get updated balance
+      const updatedBalance = await tx.organizationUsageBalance.findUnique({
+        where: { orgBillingId },
+      });
+
+      return updatedBalance!.balanceCents;
+    });
+
+    return { balanceCents: result, alreadyProcessed: false };
+  }
+
+  /**
+   * Log organization usage (user-visible + internal audit)
+   * All amounts in USD
+   */
+  async logOrgUsage(args: {
+    orgBillingId: string;
+    userId: string;
+    serviceType: string; // ai_inference, compute, storage, bandwidth, etc.
+    provider: string;
+    resource: string;
+    model?: string;
+    usdCostRaw: number; // raw provider cost
+    marginRate: number; // e.g., 0.5 = 50%
+    usdCharged: number; // final amount charged = usdCostRaw / (1 - marginRate)
+    requestId?: string;
+    metadata?: Record<string, unknown>;
+  }): Promise<{ usageId: string; costsPrivateId: string }> {
+    const {
+      orgBillingId,
+      userId,
+      serviceType,
+      provider,
+      resource,
+      model,
+      usdCostRaw,
+      marginRate,
+      usdCharged,
+      requestId,
+      metadata = {},
+    } = args;
+
+    // Calculate margin earned
+    const marginUsd = usdCharged - usdCostRaw;
+
+    // Create both records in a transaction
+    const result = await this.prisma.$transaction(async (tx) => {
+      // User-visible usage log
+      const usage = await tx.organizationUsageLog.create({
+        data: {
+          orgBillingId,
+          userId,
+          serviceType,
+          provider,
+          resource,
+          model: model ?? null,
+          usdCostRaw,
+          marginRate,
+          usdCharged,
+          requestId: requestId ?? null,
+          metadata: metadata as object,
+        },
+      });
+
+      // Internal audit log
+      const costsPrivate = await tx.organizationUsageCostsPrivate.create({
+        data: {
+          orgBillingId,
+          userId,
+          serviceType,
+          provider,
+          resource,
+          model: model ?? null,
+          usdCostRaw,
+          usdCharged,
+          marginRate,
+          marginUsd,
+          metadata: metadata as object,
+        },
+      });
+
+      return { usageId: usage.id, costsPrivateId: costsPrivate.id };
+    });
+
+    return result;
+  }
+
+  /**
+   * Get usage ledger entries for an org with pagination
+   */
+  async getOrgUsageLedger(args: {
+    orgBillingId: string;
+    limit?: number;
+    cursor?: string;
+    direction?: UsageLedgerDirection;
+    reason?: string;
+  }): Promise<{ items: OrganizationUsageLedger[]; nextCursor?: string }> {
+    const { orgBillingId, limit = 50, cursor, direction, reason } = args;
+    const take = Math.min(limit, 200);
+
+    const where: Record<string, unknown> = { orgBillingId };
+    if (direction) where.direction = direction;
+    if (reason) where.reason = reason;
+
+    // Parse cursor if provided (format: "createdAt:id")
+    let cursorFilter: { createdAt?: { lt: Date }; id?: { lt: string } } | undefined;
+    if (cursor) {
+      const [createdAtStr, id] = cursor.split(':');
+      const createdAt = new Date(parseInt(createdAtStr, 10));
+      cursorFilter = { createdAt: { lt: createdAt }, id: { lt: id } };
+    }
+
+    const results = await this.prisma.organizationUsageLedger.findMany({
+      where: cursorFilter ? { ...where, OR: [
+        { createdAt: { lt: cursorFilter.createdAt?.lt } },
+        { createdAt: cursorFilter.createdAt?.lt, id: { lt: cursorFilter.id?.lt } },
+      ]} : where,
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      take: take + 1, // Fetch one extra to determine if there's a next page
+    });
+
+    const hasNext = results.length > take;
+    const items = hasNext ? results.slice(0, take) : results;
+
+    const mapped = items.map((r) => ({
+      id: r.id,
+      org_billing_id: r.orgBillingId,
+      actor_user_id: r.actorUserId ?? undefined,
+      direction: r.direction as UsageLedgerDirection,
+      amount_cents: r.amountCents,
+      reason: r.reason,
+      idempotency_key: r.idempotencyKey,
+      metadata: r.metadata as Record<string, unknown>,
+      created_at: r.createdAt.getTime(),
+    }));
+
+    const nextCursor = hasNext && items.length > 0
+      ? `${items[items.length - 1].createdAt.getTime()}:${items[items.length - 1].id}`
+      : undefined;
+
+    return { items: mapped, nextCursor };
+  }
+
+  /**
+   * Get usage log entries for an org with pagination and date filtering
+   */
+  async getOrgUsageLog(args: {
+    orgBillingId: string;
+    serviceType?: string;
+    periodStart?: number;
+    periodEnd?: number;
+    limit?: number;
+    offset?: number;
+  }): Promise<{ items: OrganizationUsageLog[]; summary: { usdCharged: number; usdCostRaw: number } }> {
+    const { orgBillingId, serviceType, periodStart, periodEnd, limit = 50, offset = 0 } = args;
+
+    // Default to last 30 days if not specified
+    const now = Date.now();
+    const start = periodStart ?? now - 30 * 24 * 60 * 60 * 1000;
+    const end = periodEnd ?? now;
+
+    const where: Record<string, unknown> = {
+      orgBillingId,
+      createdAt: {
+        gte: new Date(start),
+        lte: new Date(end),
+      },
+    };
+    if (serviceType) where.serviceType = serviceType;
+
+    const [results, aggregation] = await Promise.all([
+      this.prisma.organizationUsageLog.findMany({
+        where,
+        orderBy: { createdAt: 'desc' },
+        take: Math.min(limit, 200),
+        skip: offset,
+      }),
+      this.prisma.organizationUsageLog.aggregate({
+        where,
+        _sum: {
+          usdCharged: true,
+          usdCostRaw: true,
+        },
+      }),
+    ]);
+
+    const items = results.map((r) => ({
+      id: r.id,
+      org_billing_id: r.orgBillingId,
+      user_id: r.userId,
+      service_type: r.serviceType,
+      provider: r.provider,
+      resource: r.resource,
+      model: r.model ?? undefined,
+      usd_cost_raw: r.usdCostRaw,
+      margin_rate: r.marginRate,
+      usd_charged: r.usdCharged,
+      request_id: r.requestId ?? undefined,
+      metadata: r.metadata as Record<string, unknown>,
+      created_at: r.createdAt.getTime(),
+    }));
+
+    return {
+      items,
+      summary: {
+        usdCharged: aggregation._sum.usdCharged ?? 0,
+        usdCostRaw: aggregation._sum.usdCostRaw ?? 0,
+      },
+    };
   }
 }
 

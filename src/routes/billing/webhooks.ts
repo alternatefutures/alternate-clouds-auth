@@ -7,6 +7,7 @@ import { Hono } from 'hono';
 import { nanoid } from 'nanoid';
 import { dbService } from '../../services/db.service';
 import { getProvider, isProviderAvailable } from '../../services/payments';
+import { processTopupFromWebhook } from './credits';
 
 const app = new Hono();
 
@@ -207,6 +208,31 @@ async function processStripeEvent(event: WebhookEvent): Promise<void> {
   switch (event.type) {
     case 'payment_intent.succeeded': {
       const paymentIntentId = data.id as string;
+      const metadata = data.metadata as Record<string, string> | undefined;
+
+      // Check if this is a credits topup
+      if (metadata?.type === 'org_credits_topup') {
+        const orgBillingId = metadata.orgBillingId;
+        const amountCents = (data.amount_received as number) ?? (data.amount as number) ?? 0;
+        const userId = metadata.userId;
+
+        if (orgBillingId) {
+          try {
+            const result = await processTopupFromWebhook({
+              paymentIntentId,
+              orgBillingId,
+              amountCents,
+              userId,
+            });
+            console.log(`Topup processed via webhook: $${(result.amountAddedCents / 100).toFixed(2)} added, balance: $${(result.balanceCents / 100).toFixed(2)}, alreadyProcessed: ${result.alreadyProcessed}`);
+          } catch (topupError) {
+            console.error('Credits topup webhook processing error:', topupError);
+          }
+        }
+        break;
+      }
+
+      // Standard payment processing
       const payment = await dbService.getPaymentByStripePaymentIntentId(paymentIntentId);
       if (payment) {
         await dbService.updatePayment(payment.id, { status: 'SUCCEEDED' });
