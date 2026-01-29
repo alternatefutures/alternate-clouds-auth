@@ -143,6 +143,9 @@ export interface OrganizationBilling {
   id: string;
   organization_id: string;
   stripe_customer_id?: string;
+  trial_started_at?: number;
+  trial_ends_at?: number;
+  trial_converted: boolean;
   created_at: number;
   updated_at: number;
 }
@@ -193,6 +196,11 @@ export interface SubscriptionPlan {
   usage_markup: number;
   features?: string;
   stripe_price_id?: string;
+  included_storage_gb: number;
+  included_bandwidth_gb: number;
+  included_invocations: number;
+  included_compute_seconds: number;
+  trial_days: number;
   created_at: number;
   updated_at: number;
 }
@@ -419,36 +427,65 @@ export class DatabaseService {
         id: 'plan_free',
         name: 'FREE',
         basePricePerSeat: 0,
-        usageMarkup: 0.2,
-        features: JSON.stringify(['1 project', '1GB storage', '10GB bandwidth/month']),
+        usageMarkup: 0.2, // 20% markup on overage
+        features: JSON.stringify(['1 project', 'Community support']),
+        includedStorageGb: 1,
+        includedBandwidthGb: 10,
+        includedInvocations: 10000,
+        includedComputeSeconds: 10000,
+        trialDays: 0, // Free doesn't need trial
       },
       {
         id: 'plan_starter',
         name: 'STARTER',
-        basePricePerSeat: 1900,
-        usageMarkup: 0.1,
-        features: JSON.stringify(['5 projects', '10GB storage', '100GB bandwidth/month']),
+        basePricePerSeat: 2000, // $20 in cents
+        usageMarkup: 0.1, // 10% markup on overage
+        features: JSON.stringify(['10 projects', 'Email support', 'Team collaboration']),
+        includedStorageGb: 10,
+        includedBandwidthGb: 100,
+        includedInvocations: 500000,
+        includedComputeSeconds: 100000,
+        trialDays: 30,
       },
       {
         id: 'plan_pro',
         name: 'PRO',
-        basePricePerSeat: 4900,
-        usageMarkup: 0,
-        features: JSON.stringify(['Unlimited projects', '100GB storage', '1TB bandwidth/month']),
+        basePricePerSeat: 4900, // $49 in cents
+        usageMarkup: 0, // No markup on overage
+        features: JSON.stringify(['Unlimited projects', 'Priority support', 'Advanced analytics', 'Custom domains']),
+        includedStorageGb: 100,
+        includedBandwidthGb: 1000,
+        includedInvocations: 5000000,
+        includedComputeSeconds: 1000000,
+        trialDays: 14,
       },
       {
         id: 'plan_enterprise',
         name: 'ENTERPRISE',
-        basePricePerSeat: 0,
-        usageMarkup: 0,
-        features: JSON.stringify(['Custom limits', 'SLA', 'Dedicated support']),
+        basePricePerSeat: 0, // Custom pricing
+        usageMarkup: -0.1, // 10% discount on usage
+        features: JSON.stringify(['Custom limits', 'SLA', 'Dedicated support', 'SSO', 'Audit logs']),
+        includedStorageGb: 0, // Custom
+        includedBandwidthGb: 0, // Custom
+        includedInvocations: 0, // Custom
+        includedComputeSeconds: 0, // Custom
+        trialDays: 0, // Custom
       },
     ];
 
     for (const plan of plans) {
       await this.prisma.subscriptionPlan.upsert({
         where: { id: plan.id },
-        update: {},
+        update: {
+          basePricePerSeat: plan.basePricePerSeat,
+          usageMarkup: plan.usageMarkup,
+          features: plan.features,
+          includedStorageGb: plan.includedStorageGb,
+          includedBandwidthGb: plan.includedBandwidthGb,
+          includedInvocations: plan.includedInvocations,
+          includedComputeSeconds: plan.includedComputeSeconds,
+          trialDays: plan.trialDays,
+        },
         create: plan,
       });
     }
@@ -1313,6 +1350,9 @@ export class DatabaseService {
         id: billing.id,
         organizationId: billing.organization_id,
         stripeCustomerId: billing.stripe_customer_id,
+        trialStartedAt: billing.trial_started_at ? new Date(billing.trial_started_at) : null,
+        trialEndsAt: billing.trial_ends_at ? new Date(billing.trial_ends_at) : null,
+        trialConverted: billing.trial_converted ?? false,
       },
     });
 
@@ -1320,6 +1360,9 @@ export class DatabaseService {
       id: result.id,
       organization_id: result.organizationId,
       stripe_customer_id: result.stripeCustomerId ?? undefined,
+      trial_started_at: dateToTimestamp(result.trialStartedAt),
+      trial_ends_at: dateToTimestamp(result.trialEndsAt),
+      trial_converted: result.trialConverted,
       created_at: result.createdAt.getTime(),
       updated_at: result.updatedAt.getTime(),
     };
@@ -1336,6 +1379,9 @@ export class DatabaseService {
       id: result.id,
       organization_id: result.organizationId,
       stripe_customer_id: result.stripeCustomerId ?? undefined,
+      trial_started_at: dateToTimestamp(result.trialStartedAt),
+      trial_ends_at: dateToTimestamp(result.trialEndsAt),
+      trial_converted: result.trialConverted,
       created_at: result.createdAt.getTime(),
       updated_at: result.updatedAt.getTime(),
     };
@@ -1353,21 +1399,35 @@ export class DatabaseService {
   }
 
   /**
-   * Create a default organization for a new user (with membership and billing)
+   * Create a default organization for a new user (with membership, billing, and trial subscription)
    * This is called when a user signs up via email, wallet, or OAuth
    */
   async createDefaultOrganizationForUser(params: {
     orgId: string;
     memberId: string;
     billingId: string;
+    billingCustomerId: string;
+    subscriptionId: string;
     userId: string;
     orgSlug: string;
     orgName: string;
   }): Promise<Organization> {
-    const { orgId, memberId, billingId, userId, orgSlug, orgName } = params;
+    const { orgId, memberId, billingId, billingCustomerId, subscriptionId, userId, orgSlug, orgName } = params;
 
-    // Use transaction to ensure all three are created atomically
-    const [org] = await this.prisma.$transaction([
+    const now = new Date();
+    const trialEndsAt = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000); // 30 days
+    const periodEnd = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
+
+    // Check if user already has a BillingCustomer (edge case: existing user adding via new auth method)
+    const existingBillingCustomer = await this.prisma.billingCustomer.findUnique({
+      where: { userId },
+    });
+
+    const actualBillingCustomerId = existingBillingCustomer?.id || billingCustomerId;
+
+    // Build the transaction operations
+    const operations = [
+      // 1. Create organization
       this.prisma.organization.create({
         data: {
           id: orgId,
@@ -1375,6 +1435,8 @@ export class DatabaseService {
           name: orgName,
         },
       }),
+
+      // 2. Create membership (OWNER)
       this.prisma.organizationMember.create({
         data: {
           id: memberId,
@@ -1383,13 +1445,52 @@ export class DatabaseService {
           role: 'OWNER',
         },
       }),
+    ];
+
+    // 3. Only create BillingCustomer if user doesn't have one
+    if (!existingBillingCustomer) {
+      operations.push(
+        this.prisma.billingCustomer.create({
+          data: {
+            id: billingCustomerId,
+            userId: userId,
+          },
+        })
+      );
+    }
+
+    // 4. Create OrganizationBilling with trial tracking
+    operations.push(
       this.prisma.organizationBilling.create({
         data: {
           id: billingId,
           organizationId: orgId,
+          trialStartedAt: now,
+          trialEndsAt: trialEndsAt,
+          trialConverted: false,
         },
-      }),
-    ]);
+      })
+    );
+
+    // 5. Create trial subscription (links to BOTH billing entities)
+    operations.push(
+      this.prisma.subscription.create({
+        data: {
+          id: subscriptionId,
+          customerId: actualBillingCustomerId, // Use existing or new BillingCustomer
+          orgBillingId: billingId, // Optional FK to OrganizationBilling
+          planId: 'plan_starter',
+          status: 'TRIALING',
+          seats: 1,
+          currentPeriodStart: now,
+          currentPeriodEnd: periodEnd,
+          trialEnd: trialEndsAt,
+        },
+      })
+    );
+
+    // Execute transaction
+    const [org] = await this.prisma.$transaction(operations);
 
     return {
       id: org.id,
@@ -1668,6 +1769,11 @@ export class DatabaseService {
       usage_markup: result.usageMarkup,
       features: result.features ?? undefined,
       stripe_price_id: result.stripePriceId ?? undefined,
+      included_storage_gb: result.includedStorageGb,
+      included_bandwidth_gb: result.includedBandwidthGb,
+      included_invocations: result.includedInvocations,
+      included_compute_seconds: result.includedComputeSeconds,
+      trial_days: result.trialDays,
       created_at: result.createdAt.getTime(),
       updated_at: result.updatedAt.getTime(),
     };
@@ -1683,6 +1789,11 @@ export class DatabaseService {
       usage_markup: result.usageMarkup,
       features: result.features ?? undefined,
       stripe_price_id: result.stripePriceId ?? undefined,
+      included_storage_gb: result.includedStorageGb,
+      included_bandwidth_gb: result.includedBandwidthGb,
+      included_invocations: result.includedInvocations,
+      included_compute_seconds: result.includedComputeSeconds,
+      trial_days: result.trialDays,
       created_at: result.createdAt.getTime(),
       updated_at: result.updatedAt.getTime(),
     }));
@@ -1703,6 +1814,11 @@ export class DatabaseService {
       usage_markup: result.usageMarkup,
       features: result.features ?? undefined,
       stripe_price_id: result.stripePriceId ?? undefined,
+      included_storage_gb: result.includedStorageGb,
+      included_bandwidth_gb: result.includedBandwidthGb,
+      included_invocations: result.includedInvocations,
+      included_compute_seconds: result.includedComputeSeconds,
+      trial_days: result.trialDays,
       created_at: result.createdAt.getTime(),
       updated_at: result.updatedAt.getTime(),
     };
@@ -1878,6 +1994,34 @@ export class DatabaseService {
       created_at: result.createdAt.getTime(),
       updated_at: result.updatedAt.getTime(),
     }));
+  }
+
+  async getSubscriptionByOrgBillingId(orgBillingId: string): Promise<Subscription | null> {
+    const result = await this.prisma.subscription.findFirst({
+      where: {
+        orgBillingId,
+        status: { in: ['ACTIVE', 'TRIALING', 'PAST_DUE'] },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    if (!result) return null;
+
+    return {
+      id: result.id,
+      customer_id: result.customerId,
+      plan_id: result.planId,
+      status: result.status as SubscriptionStatus,
+      seats: result.seats,
+      stripe_subscription_id: result.stripeSubscriptionId ?? undefined,
+      current_period_start: result.currentPeriodStart.getTime(),
+      current_period_end: result.currentPeriodEnd.getTime(),
+      cancel_at: dateToTimestamp(result.cancelAt),
+      canceled_at: dateToTimestamp(result.canceledAt),
+      trial_end: dateToTimestamp(result.trialEnd),
+      created_at: result.createdAt.getTime(),
+      updated_at: result.updatedAt.getTime(),
+    };
   }
 
   // ============================================

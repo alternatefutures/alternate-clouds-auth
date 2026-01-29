@@ -173,6 +173,12 @@ model OrganizationBilling {
   id               String   @id @default(uuid())
   organizationId   String   @unique @map("organization_id")
   stripeCustomerId String?  @unique @map("stripe_customer_id")
+
+  // Trial tracking
+  trialStartedAt   DateTime? @map("trial_started_at")
+  trialEndsAt      DateTime? @map("trial_ends_at")
+  trialConverted   Boolean   @default(false) @map("trial_converted")
+
   createdAt        DateTime @default(now()) @map("created_at")
   updatedAt        DateTime @updatedAt @map("updated_at")
 
@@ -245,6 +251,16 @@ model SubscriptionPlan {
   usageMarkup      Float    @default(0) @map("usage_markup") // percentage as decimal
   features         String?  // JSON array
   stripePriceId    String?  @map("stripe_price_id")
+
+  // Included usage per org/month
+  includedStorageGb      Int   @default(0) @map("included_storage_gb")
+  includedBandwidthGb    Int   @default(0) @map("included_bandwidth_gb")
+  includedInvocations    Int   @default(0) @map("included_invocations")
+  includedComputeSeconds Int   @default(0) @map("included_compute_seconds")
+
+  // Trial configuration
+  trialDays           Int      @default(0) @map("trial_days")
+
   createdAt        DateTime @default(now()) @map("created_at")
   updatedAt        DateTime @updatedAt @map("updated_at")
 

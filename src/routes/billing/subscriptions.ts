@@ -320,11 +320,117 @@ app.get('/plans', async (c) => {
         basePricePerSeat: p.base_price_per_seat,
         usageMarkup: p.usage_markup,
         features: p.features ? JSON.parse(p.features) : null,
+        includedStorageGb: p.included_storage_gb,
+        includedBandwidthGb: p.included_bandwidth_gb,
+        includedInvocations: p.included_invocations,
+        includedComputeSeconds: p.included_compute_seconds,
+        trialDays: p.trial_days,
       })),
     });
   } catch (error) {
     console.error('List plans error:', error);
     return c.json({ error: 'Failed to list plans' }, 500);
+  }
+});
+
+/**
+ * GET /billing/subscriptions/org/:orgId
+ * Get subscription for an organization (not user-scoped)
+ */
+app.get('/org/:orgId', async (c) => {
+  try {
+    const user = requireAuthUser(c);
+    const { orgId } = c.req.param();
+
+    // Verify user is member of org
+    const isMember = await dbService.isUserMemberOfOrganization(user.userId, orgId);
+    if (!isMember) {
+      return c.json({ error: 'Not a member of this organization' }, 403);
+    }
+
+    // Get org billing
+    const orgBilling = await dbService.getOrganizationBillingByOrgId(orgId);
+    if (!orgBilling) {
+      return c.json({ error: 'Organization billing not found' }, 404);
+    }
+
+    // Get active subscription for this org
+    const subscription = await dbService.getSubscriptionByOrgBillingId(orgBilling.id);
+    if (!subscription) {
+      return c.json({ subscription: null, trial: null });
+    }
+
+    // Get plan details
+    const plan = await dbService.getSubscriptionPlanById(subscription.plan_id);
+
+    return c.json({
+      subscription: {
+        id: subscription.id,
+        plan: plan?.name || 'UNKNOWN',
+        status: subscription.status,
+        seats: subscription.seats,
+        basePricePerSeat: plan?.base_price_per_seat || 0,
+        usageMarkup: plan?.usage_markup || 0,
+        includedStorageGb: plan?.included_storage_gb || 0,
+        includedBandwidthGb: plan?.included_bandwidth_gb || 0,
+        includedInvocations: plan?.included_invocations || 0,
+        includedComputeSeconds: plan?.included_compute_seconds || 0,
+        currentPeriodStart: subscription.current_period_start,
+        currentPeriodEnd: subscription.current_period_end,
+        cancelAt: subscription.cancel_at,
+        trialEnd: subscription.trial_end,
+        createdAt: subscription.created_at,
+      },
+      trial: {
+        startedAt: orgBilling.trial_started_at,
+        endsAt: orgBilling.trial_ends_at,
+        converted: orgBilling.trial_converted,
+        daysRemaining: orgBilling.trial_ends_at
+          ? Math.max(0, Math.ceil((orgBilling.trial_ends_at - Date.now()) / (24 * 60 * 60 * 1000)))
+          : null,
+      },
+    });
+  } catch (error) {
+    console.error('Get org subscription error:', error);
+    return c.json({ error: 'Failed to get organization subscription' }, 500);
+  }
+});
+
+/**
+ * GET /billing/subscriptions/trial-status
+ * Get trial status for current user's organizations
+ */
+app.get('/trial-status', async (c) => {
+  try {
+    const user = requireAuthUser(c);
+
+    // Get all orgs user belongs to
+    const orgs = await dbService.getOrganizationsByUserId(user.userId);
+
+    const trialStatuses = await Promise.all(
+      orgs.map(async (org) => {
+        const billing = await dbService.getOrganizationBillingByOrgId(org.id);
+        if (!billing) return null;
+
+        return {
+          organizationId: org.id,
+          organizationName: org.name,
+          trialStartedAt: billing.trial_started_at,
+          trialEndsAt: billing.trial_ends_at,
+          trialConverted: billing.trial_converted,
+          daysRemaining: billing.trial_ends_at
+            ? Math.max(0, Math.ceil((billing.trial_ends_at - Date.now()) / (24 * 60 * 60 * 1000)))
+            : null,
+        };
+      })
+    );
+
+    return c.json({
+      trials: trialStatuses.filter(Boolean),
+    });
+  } catch (error) {
+    console.error('Get trial status error:', error);
+    return c.json({ error: 'Failed to get trial status' }, 500);
   }
 });
 
