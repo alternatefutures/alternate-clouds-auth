@@ -368,7 +368,8 @@ export async function getOrgBillingFromRequest(c: Context): Promise<{
   userId: string;
 } | null> {
   const orgId = c.req.header('X-Organization-Id');
-  const userId = c.get('userId') as string | undefined;
+  const user = c.get('user') as { userId?: string } | undefined;
+  const userId = user?.userId;
 
   if (!orgId || !userId) {
     return null;
@@ -385,7 +386,6 @@ export async function getOrgBillingFromRequest(c: Context): Promise<{
   if (!orgBilling) {
     return null;
   }
-
   return {
     orgBillingId: orgBilling.id,
     userId,

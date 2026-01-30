@@ -12,7 +12,6 @@ import {
   parseOpenAIUsage,
   processUsage,
   UsageProcessingTransformStream,
-  injectStreamUsageOption,
 } from './_lib/costMetering';
 import { IMAGE_GENERATION_COSTS } from './_lib/costs';
 
@@ -89,30 +88,33 @@ app.all('/*', async (c) => {
   const proxyUrl = `${OPENAI_BASE_URL}/${path}`;
   const endpoint = path.split('?')[0];
 
-  // Prepare proxy request
-  let proxyRequest = c.req.raw.clone();
-
-  // Inject stream_options.include_usage for streaming requests
-  if (endpoint.includes('chat/completions') || endpoint.includes('responses')) {
-    proxyRequest = await injectStreamUsageOption(proxyRequest);
-  }
-
-  // Build headers
-  const headers: Record<string, string> = {};
-  for (const [key, value] of proxyRequest.headers) {
-    if (key.toLowerCase() !== 'host' && !key.toLowerCase().startsWith('x-')) {
-      headers[key] = value;
+  // Build headers - filter out host and x-* headers
+  const headers: Record<string, string> = {
+    'Authorization': `Bearer ${OPENAI_API_KEY}`,
+    'Content-Type': 'application/json',
+  };
+  
+  // Get request body
+  let requestBody: string | undefined;
+  if (c.req.method !== 'GET' && c.req.method !== 'HEAD') {
+    try {
+      const body = await c.req.json();
+      // Inject stream_options.include_usage for streaming requests
+      if ((endpoint.includes('chat/completions') || endpoint.includes('responses')) && body.stream === true) {
+        body.stream_options = { ...body.stream_options, include_usage: true };
+      }
+      requestBody = JSON.stringify(body);
+    } catch {
+      // If body parsing fails, try to get raw text
+      requestBody = await c.req.text();
     }
   }
-  headers['Authorization'] = `Bearer ${OPENAI_API_KEY}`;
 
   // Make upstream request
   const upstreamResponse = await fetch(proxyUrl, {
-    method: proxyRequest.method,
+    method: c.req.method,
     headers,
-    body: proxyRequest.method !== 'GET' && proxyRequest.method !== 'HEAD' ? proxyRequest.body : undefined,
-    // @ts-ignore - duplex is needed for streaming request bodies
-    duplex: proxyRequest.method !== 'GET' && proxyRequest.method !== 'HEAD' ? 'half' : undefined,
+    body: requestBody,
   });
 
   // Handle non-OK responses
