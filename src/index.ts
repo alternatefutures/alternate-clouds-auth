@@ -8,6 +8,8 @@ import authRoutes from './routes/auth';
 import accountRoutes from './routes/account';
 import tokensRoutes from './routes/tokens';
 import billingRoutes from './routes/billing';
+import organizationsRoutes from './routes/organizations';
+import aiRoutes from './routes/ai';
 
 // Initialize secrets before anything else
 await secretsService.initialize();
@@ -158,6 +160,12 @@ app.route('/tokens', tokensRoutes);
 // Mount billing routes
 app.route('/billing', billingRoutes);
 
+// Mount organizations routes
+app.route('/organizations', organizationsRoutes);
+
+// Mount AI inference proxy routes
+app.route('/ai', aiRoutes);
+
 // 404 handler
 app.notFound((c) => {
   return c.json({ error: 'Not Found' }, 404);
@@ -175,7 +183,7 @@ app.onError((err, c) => {
   );
 });
 
-const port = parseInt(process.env.PORT || '3000');
+const port = parseInt(process.env.PORT || '1601');
 
 console.log(`🚀 Alternate Futures Auth Service starting on port ${port}`);
 

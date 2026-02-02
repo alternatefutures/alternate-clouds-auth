@@ -22,7 +22,5 @@ jobs:
           fail-on-severity: moderate
           # Comment on the PR with the results
           comment-summary-in-pr: true
-          # Deny licenses that are not compatible with the project
-          deny-licenses: GPL-2.0, GPL-3.0, AGPL-3.0
-          # Allow certain licenses
-          allow-licenses: MIT, Apache-2.0, BSD-2-Clause, BSD-3-Clause, ISC, 0BSD
+          # Only allow permissive licenses (AGPL-3.0 included for CI tools like TruffleHog)
+          allow-licenses: MIT, Apache-2.0, BSD-2-Clause, BSD-3-Clause, ISC, 0BSD, CC0-1.0, Unlicense, WTFPL, CC-BY-3.0, CC-BY-4.0, Python-2.0, BlueOak-1.0.0, AGPL-3.0

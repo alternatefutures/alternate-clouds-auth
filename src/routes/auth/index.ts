@@ -4,6 +4,8 @@ import smsRoutes from './sms';
 import walletRoutes from './wallet';
 import oauthRoutes from './oauth';
 import sessionRoutes from './session';
+import exchangeRoutes from './exchange';
+import cliRoutes from './cli';
 
 const app = new Hono();
 
@@ -13,5 +15,7 @@ app.route('/sms', smsRoutes);
 app.route('/wallet', walletRoutes);
 app.route('/oauth', oauthRoutes);
 app.route('/', sessionRoutes);
+app.route('/', exchangeRoutes);
+app.route('/', cliRoutes);
 
 export default app;

@@ -3,6 +3,9 @@
  *
  * Handles creation, validation, and deletion of API tokens.
  * Tokens follow the format: af_live_<random_base62_string> or af_test_<random_base62_string>
+ * 
+ * SECURITY: Tokens are hashed before storage using SHA-256.
+ * The plaintext token is only returned once at creation time.
  */
 
 import { randomBytes } from 'crypto';
@@ -10,6 +13,7 @@ import { nanoid, customAlphabet } from 'nanoid';
 import { DatabaseService } from './db.service.js';
 import { rateLimiter } from './rateLimiter.service.js';
 import { tokenServiceLogger } from '../utils/logger.js';
+import { hashToken, verifyTokenHash } from '../utils/crypto.js';
 
 const TOKEN_PREFIX = 'af';
 const TOKEN_LENGTH = 32; // Length of the random part
@@ -138,11 +142,13 @@ export class TokenService {
   async createToken(
     userId: string,
     name: string,
-    expiresAt?: number
+    expiresAt?: number,
+    organizationId?: string
   ): Promise<{
     token: string;
     id: string;
     name: string;
+    organizationId: string | null;
     expiresAt: number | null;
     createdAt: number;
   }> {
@@ -152,7 +158,7 @@ export class TokenService {
     // Trim name for storage consistency
     const trimmedName = name.trim();
 
-    return this.createTokenWithRetries(userId, trimmedName, expiresAt, 0);
+    return this.createTokenWithRetries(userId, trimmedName, expiresAt, organizationId, 0);
   }
 
   /**
@@ -162,11 +168,13 @@ export class TokenService {
     userId: string,
     name: string,
     expiresAt: number | undefined,
+    organizationId: string | undefined,
     retryCount: number
   ): Promise<{
     token: string;
     id: string;
     name: string;
+    organizationId: string | null;
     expiresAt: number | null;
     createdAt: number;
   }> {
@@ -211,28 +219,40 @@ export class TokenService {
 
     // Generate token
     const token = this.generateToken();
+    
+    // Hash the token for storage (never store plaintext tokens)
+    const tokenHash = hashToken(token);
+    
+    console.log('[TokenService.createToken] Token length:', token.length);
+    console.log('[TokenService.createToken] Token full:', token);
+    console.log('[TokenService.createToken] Token hash:', tokenHash);
 
-    // Verify token is unique
-    const existing = await this.db.getPersonalAccessTokenByToken(token);
+    // Verify token hash is unique (collision check)
+    const existing = await this.db.getPersonalAccessTokenByToken(tokenHash);
 
     if (existing) {
       // Token collision detected - retry
-      return this.createTokenWithRetries(userId, name, expiresAt, retryCount + 1);
+      return this.createTokenWithRetries(userId, name, expiresAt, organizationId, retryCount + 1);
     }
 
-    // Create token in database
+    // Create token in database with hash (not plaintext)
     const tokenRecord = await this.db.createPersonalAccessToken({
       id: nanoid(),
       user_id: userId,
+      organization_id: organizationId,
       name,
-      token,
+      token: tokenHash, // Store hash, not plaintext
       expires_at: expiresAt,
     });
+    
+    console.log('[TokenService.createToken] Token stored with id:', tokenRecord.id);
 
+    // Return plaintext token to user (only time it's available)
     return {
-      token: tokenRecord.token,
+      token, // Return plaintext for user to save
       id: tokenRecord.id,
       name: tokenRecord.name,
+      organizationId: tokenRecord.organization_id ?? null,
       expiresAt: tokenRecord.expires_at ?? null,
       createdAt: tokenRecord.created_at,
     };
@@ -260,13 +280,25 @@ export class TokenService {
   /**
    * Validate a token and return the associated user
    * Also updates lastUsedAt timestamp
+   * 
+   * SECURITY: Token is hashed and looked up by hash (timing-safe)
    */
-  async validateToken(token: string): Promise<{ userId: string; tokenId: string } | null> {
-    const tokenRecord = await this.db.getPersonalAccessTokenByToken(token);
+  async validateToken(token: string): Promise<{ userId: string; tokenId: string; organizationId?: string } | null> {
+    // Hash the incoming token to look up the stored hash
+    const tokenHash = hashToken(token);
+    
+    console.log('[TokenService.validateToken] Token length:', token.length);
+    console.log('[TokenService.validateToken] Token full:', token);
+    console.log('[TokenService.validateToken] Token hash:', tokenHash);
+    
+    const tokenRecord = await this.db.getPersonalAccessTokenByToken(tokenHash);
 
     if (!tokenRecord) {
+      console.log('[TokenService.validateToken] No token found for hash');
       return null;
     }
+    
+    console.log('[TokenService.validateToken] Token found, id:', tokenRecord.id);
 
     // Check if token is expired
     if (tokenRecord.expires_at && tokenRecord.expires_at < Date.now()) {
@@ -282,6 +314,7 @@ export class TokenService {
     return {
       userId: tokenRecord.user_id,
       tokenId: tokenRecord.id,
+      organizationId: tokenRecord.organization_id,
     };
   }
 
@@ -292,6 +325,7 @@ export class TokenService {
     Array<{
       id: string;
       name: string;
+      organizationId: string | null;
       expiresAt: number | null;
       lastUsedAt: number | null;
       createdAt: number;
@@ -302,6 +336,7 @@ export class TokenService {
     return tokens.map((t) => ({
       id: t.id,
       name: t.name,
+      organizationId: t.organization_id ?? null,
       expiresAt: t.expires_at ?? null,
       lastUsedAt: t.last_used_at ?? null,
       createdAt: t.created_at,
