@@ -84,6 +84,6 @@ jobs:
         uses: trufflesecurity/trufflehog@v3.92.5
         with:
           path: ./
-          base: ${{ github.event.repository.default_branch }}
-          head: HEAD
+          # Don't pass base/head explicitly; the action auto-selects the correct
+          # commit range for push vs pull_request vs schedule/workflow_dispatch.
           extra_args: --only-verified
