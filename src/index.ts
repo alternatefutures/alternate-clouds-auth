@@ -174,10 +174,12 @@ app.notFound((c) => {
 // Error handler
 app.onError((err, c) => {
   console.error('Error:', err);
+  const isDev = process.env.NODE_ENV === 'development';
   return c.json(
     {
       error: 'Internal Server Error',
-      message: err.message,
+      // Only expose error details in development to prevent information leakage
+      ...(isDev ? { message: err.message } : {}),
     },
     500
   );

@@ -6,6 +6,7 @@ import { dbService } from '../../services/db.service';
 import { jwtService } from '../../services/jwt.service';
 import { generateOTP } from '../../utils/otp';
 import { emailAuthRequestSchema, emailAuthVerifySchema } from '../../utils/validators';
+import { timingSafeCompare } from '../../utils/crypto';
 import { strictRateLimit } from '../../middleware/ratelimit';
 
 const app = new Hono();
@@ -83,8 +84,8 @@ app.post('/verify', strictRateLimit, async (c) => {
       return c.json({ error: 'Too many failed attempts. Please request a new code.' }, 400);
     }
 
-    // Verify code
-    if (verificationCode.code !== code) {
+    // Verify code (timing-safe comparison to prevent timing attacks)
+    if (!timingSafeCompare(verificationCode.code, code)) {
       // Increment attempt counter
       await dbService.incrementVerificationAttempts(verificationCode.id);
 
@@ -101,11 +102,8 @@ app.post('/verify', strictRateLimit, async (c) => {
     let user = await dbService.getUserByEmail(email);
     let isNewUser = false;
 
-    console.log('[DEBUG] Email verify - user lookup result:', user ? `found user ${user.id}` : 'no user found');
-
     if (!user) {
       isNewUser = true;
-      console.log('[DEBUG] Creating new user for email:', email);
       
       // Create new user
       user = await dbService.createUser({
@@ -114,7 +112,6 @@ app.post('/verify', strictRateLimit, async (c) => {
         email_verified: 1,
         phone_verified: 0,
       });
-      console.log('[DEBUG] Created user:', user.id);
 
       // Create auth method
       await dbService.createAuthMethod({
@@ -125,15 +122,13 @@ app.post('/verify', strictRateLimit, async (c) => {
         verified: 1,
         is_primary: 1,
       });
-      console.log('[DEBUG] Created auth method for user:', user.id);
 
       // Create default organization for new user
       const orgSlug = `user-${user.id.slice(0, 8)}`;
       const orgName = email.split('@')[0] || 'My Organization';
-      console.log('[DEBUG] Creating default org for NEW user:', { orgSlug, orgName, userId: user.id });
       
       try {
-        const org = await dbService.createDefaultOrganizationForUser({
+        await dbService.createDefaultOrganizationForUser({
           orgId: nanoid(),
           memberId: nanoid(),
           billingId: nanoid(),
@@ -143,13 +138,10 @@ app.post('/verify', strictRateLimit, async (c) => {
           orgSlug,
           orgName: `${orgName}'s Org`,
         });
-        console.log('[DEBUG] Created org for new user:', org);
       } catch (orgError) {
-        console.error('[DEBUG] ERROR creating org for new user:', orgError);
+        console.error('Failed to create default org for new user:', orgError);
       }
     } else {
-      console.log('[DEBUG] Existing user found:', user.id);
-      
       // Update email verification status
       await dbService.updateUser(user.id, {
         email_verified: 1,
@@ -158,15 +150,13 @@ app.post('/verify', strictRateLimit, async (c) => {
 
       // Check if existing user has an organization, create one if not
       const existingOrgs = await dbService.getOrganizationsByUserId(user.id);
-      console.log('[DEBUG] Existing user orgs:', existingOrgs.length, existingOrgs);
       
       if (existingOrgs.length === 0) {
         const orgSlug = `user-${user.id.slice(0, 8)}`;
         const orgName = email.split('@')[0] || 'My Organization';
-        console.log('[DEBUG] Creating default org for EXISTING user:', { orgSlug, orgName, userId: user.id });
         
         try {
-          const org = await dbService.createDefaultOrganizationForUser({
+          await dbService.createDefaultOrganizationForUser({
             orgId: nanoid(),
             memberId: nanoid(),
             billingId: nanoid(),
@@ -176,12 +166,9 @@ app.post('/verify', strictRateLimit, async (c) => {
             orgSlug,
             orgName: `${orgName}'s Org`,
           });
-          console.log('[DEBUG] Created org for existing user:', org);
         } catch (orgError) {
-          console.error('[DEBUG] ERROR creating org for existing user:', orgError);
+          console.error('Failed to create default org for existing user:', orgError);
         }
-      } else {
-        console.log('[DEBUG] User already has orgs, skipping creation');
       }
     }
 

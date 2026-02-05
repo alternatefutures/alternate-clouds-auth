@@ -223,9 +223,8 @@ export class TokenService {
     // Hash the token for storage (never store plaintext tokens)
     const tokenHash = hashToken(token);
     
-    console.log('[TokenService.createToken] Token length:', token.length);
-    console.log('[TokenService.createToken] Token full:', token);
-    console.log('[TokenService.createToken] Token hash:', tokenHash);
+    // Token prefix logged for debugging; never log the full token
+    tokenServiceLogger.info('Token generated', { prefix: token.slice(0, 10) + '...' });
 
     // Verify token hash is unique (collision check)
     const existing = await this.db.getPersonalAccessTokenByToken(tokenHash);
@@ -245,8 +244,6 @@ export class TokenService {
       expires_at: expiresAt,
     });
     
-    console.log('[TokenService.createToken] Token stored with id:', tokenRecord.id);
-
     // Return plaintext token to user (only time it's available)
     return {
       token, // Return plaintext for user to save
@@ -287,18 +284,11 @@ export class TokenService {
     // Hash the incoming token to look up the stored hash
     const tokenHash = hashToken(token);
     
-    console.log('[TokenService.validateToken] Token length:', token.length);
-    console.log('[TokenService.validateToken] Token full:', token);
-    console.log('[TokenService.validateToken] Token hash:', tokenHash);
-    
     const tokenRecord = await this.db.getPersonalAccessTokenByToken(tokenHash);
 
     if (!tokenRecord) {
-      console.log('[TokenService.validateToken] No token found for hash');
       return null;
     }
-    
-    console.log('[TokenService.validateToken] Token found, id:', tokenRecord.id);
 
     // Check if token is expired
     if (tokenRecord.expires_at && tokenRecord.expires_at < Date.now()) {

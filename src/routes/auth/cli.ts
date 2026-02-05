@@ -192,8 +192,6 @@ app.post('/cli/poll', standardRateLimit, async (c) => {
   let decryptedToken: string;
   try {
     decryptedToken = decryptFromStorage(payload.token);
-    console.log('[CLI Poll] Decrypted token length:', decryptedToken.length);
-    console.log('[CLI Poll] Decrypted token full:', decryptedToken);
   } catch (err) {
     console.error('[CLI Poll] Decryption failed:', err);
     return c.json({ error: 'Failed to retrieve token' }, 500);
