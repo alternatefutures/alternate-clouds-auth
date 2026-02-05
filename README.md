@@ -1,41 +1,57 @@
 # Alternate Futures Authentication Service
 
-Multi-method authentication system supporting email, SMS, Web3 wallets, and social OAuth providers.
+Multi-method authentication system supporting email, SMS, Web3 wallets, and social OAuth providers. Also handles billing, subscriptions, credits wallet, AI inference proxy, and organization management.
 
 ## Features
 
-- 🔐 **Passwordless Authentication**
-  - Email magic links
-  - SMS OTP codes
+- **Passwordless Authentication**
+  - Email OTP codes
+  - SMS OTP codes (Twilio)
 
-- 🦊 **Web3 Wallet Support**
+- **Web3 Wallet Support**
   - Sign-In with Ethereum (SIWE)
   - MetaMask, WalletConnect, Phantom
   - Support for Ethereum and Solana
 
-- 🌐 **Social OAuth Providers**
+- **Social OAuth Providers**
   - Google, Twitter/X, GitHub
   - Discord (more coming soon)
   - ~~Apple~~ (temporarily disabled)
 
-- 🔗 **Account Linking**
+- **Account Linking**
   - Link multiple auth methods to one account
   - Unified user identity
 
-- 🛡️ **Security**
+- **Organization Management**
+  - Org CRUD, membership, roles
+  - Org-scoped billing and subscriptions
+
+- **Billing & Usage Wallet**
+  - Stripe PaymentIntents, subscriptions, seat-based pricing
+  - Org-scoped USD credits wallet with idempotent ledger
+  - AI inference proxy with real-time cost metering (11 providers)
+
+- **Personal Access Tokens**
+  - Encrypted PAT creation/validation
+  - CLI login session management
+
+- **Security**
   - JWT-based sessions with refresh tokens
-  - Multi-factor authentication (MFA)
-  - Rate limiting
-  - Secure key storage
+  - Timing-safe OTP comparison
+  - Production-enforced JWT secrets (no weak fallbacks)
+  - Rate limiting (in-memory; Redis recommended for production)
+  - Sanitized error responses in production
 
 ## Tech Stack
 
-- **Runtime**: Alternate Futures Functions
-- **Framework**: Hono (edge-compatible)
-- **Database**: Turso (SQLite) or local SQLite
-- **Email**: Resend or SendGrid
-- **SMS**: httpSMS (Open Source SMS Gateway)
-- **Web3**: @noble/secp256k1, viem
+- **Runtime**: Node.js
+- **Framework**: Hono
+- **Database**: PostgreSQL via Prisma ORM
+- **Email**: Resend
+- **SMS**: Twilio
+- **Web3**: ethers.js, @noble/secp256k1
+- **Payments**: Stripe, Stax, Relay
+- **Secrets**: Infisical SDK (production)
 
 ## Quick Start
 
@@ -45,6 +61,9 @@ npm install
 
 # Set up environment variables
 cp .env.example .env
+
+# Push database schema
+npx prisma db push
 
 # Run development server
 npm run dev
@@ -56,70 +75,15 @@ npm run build
 npm start
 ```
 
-## Environment Variables
-
-```bash
-# Database
-DATABASE_URL=
-
-# JWT Secrets
-JWT_SECRET=
-JWT_REFRESH_SECRET=
-
-# Email (Resend)
-RESEND_API_KEY=
-
-# SMS (httpSMS - Open Source)
-HTTPSMS_API_KEY=
-HTTPSMS_PHONE_NUMBER=
-
-# OAuth Providers
-GOOGLE_CLIENT_ID=
-GOOGLE_CLIENT_SECRET=
-
-GITHUB_CLIENT_ID=
-GITHUB_CLIENT_SECRET=
-
-# Add more as needed
-```
-
-### Setting Up httpSMS
-
-httpSMS is an open-source SMS gateway that uses your Android phone to send/receive SMS messages:
-
-1. **Install the Android App**
-   - Download from [GitHub Releases](https://github.com/NdoleStudio/httpsms/releases)
-   - Install on any Android phone
-
-2. **Get API Key**
-   - Visit [httpsms.com/settings](https://httpsms.com/settings)
-   - Sign up and generate an API key
-   - Add your phone number in the dashboard
-
-3. **Configure Environment**
-   ```bash
-   HTTPSMS_API_KEY=your_api_key_here
-   HTTPSMS_PHONE_NUMBER=+1234567890  # Your Android phone number
-   ```
-
-4. **Self-Hosting (Optional)**
-   - httpSMS can be self-hosted for full control
-   - See [httpSMS Documentation](https://docs.httpsms.com) for self-hosting guide
-
-**Why httpSMS?**
-- ✅ Open source (MIT license)
-- ✅ End-to-end encryption (AES-256)
-- ✅ Self-hostable or cloud-hosted
-- ✅ No monthly fees (just use your existing phone plan)
-- ✅ Full control over your SMS infrastructure
+The server defaults to port **1601** (configurable via `PORT` env var).
 
 ## API Endpoints
 
 ### Authentication
 
 ```
-POST   /auth/email/request      # Request email magic link
-POST   /auth/email/verify       # Verify email code
+POST   /auth/email/request      # Request email OTP
+POST   /auth/email/verify       # Verify email OTP
 POST   /auth/sms/request        # Request SMS OTP
 POST   /auth/sms/verify         # Verify SMS OTP
 POST   /auth/wallet/challenge   # Get SIWE challenge
@@ -128,6 +92,9 @@ GET    /auth/oauth/:provider    # Initiate OAuth flow
 GET    /auth/oauth/callback     # OAuth callback
 POST   /auth/refresh            # Refresh access token
 POST   /auth/logout             # Logout (invalidate tokens)
+POST   /auth/cli/start          # Start CLI login session
+POST   /auth/cli/poll           # Poll CLI session status
+POST   /auth/cli/approve        # Approve CLI login from web
 ```
 
 ### Account Management
@@ -140,70 +107,115 @@ POST   /account/methods/link    # Link new auth method
 DELETE /account/methods/:id     # Unlink auth method
 ```
 
+### Personal Access Tokens
+
+```
+GET    /tokens                  # List PATs
+POST   /tokens                  # Create PAT
+DELETE /tokens/:id              # Revoke PAT
+POST   /tokens/validate         # Validate PAT (service-to-service)
+```
+
+### Organizations
+
+```
+GET    /organizations           # List user's orgs
+POST   /organizations           # Create org
+GET    /organizations/:id       # Get org details
+PATCH  /organizations/:id       # Update org
+DELETE /organizations/:id       # Delete org
+```
+
+### Billing
+
+```
+GET    /billing/customer        # Get billing customer
+POST   /billing/subscriptions   # Create subscription
+GET    /billing/subscriptions   # List subscriptions
+GET    /billing/invoices        # List invoices
+GET    /billing/usage           # Get usage summary
+POST   /billing/payment-methods # Add payment method
+POST   /billing/credits/topup   # Top up credits wallet
+GET    /billing/credits/balance # Get credits balance
+GET    /billing/credits/ledger  # Get usage ledger
+POST   /billing/webhook         # Stripe webhook
+```
+
+### AI Inference Proxy
+
+```
+POST   /ai/openai/*             # OpenAI proxy
+POST   /ai/anthropic/*          # Anthropic proxy
+POST   /ai/groq/*               # Groq proxy
+POST   /ai/together/*           # Together AI proxy
+POST   /ai/deepseek/*           # DeepSeek proxy
+POST   /ai/openrouter/*         # OpenRouter proxy
+POST   /ai/xai/*                # xAI proxy
+POST   /ai/stability/*          # Stability AI proxy
+POST   /ai/elevenlabs/*         # ElevenLabs proxy
+POST   /ai/fal-ai/*             # Fal AI proxy
+POST   /ai/worldlabs/*          # World Labs proxy
+```
+
 ## Project Structure
 
 ```
-alternatefutures-auth/
+service-auth/
 ├── src/
 │   ├── routes/
-│   │   ├── auth/
-│   │   │   ├── email.ts        # Email magic link
-│   │   │   ├── sms.ts          # SMS OTP
-│   │   │   ├── wallet.ts       # Web3 wallet (SIWE)
-│   │   │   ├── oauth.ts        # Social OAuth
-│   │   │   └── session.ts      # JWT sessions
-│   │   └── account/
-│   │       ├── profile.ts      # User profile
-│   │       └── methods.ts      # Auth methods management
+│   │   ├── auth/           # Authentication (email, sms, wallet, oauth, cli, session)
+│   │   ├── account/        # Profile + auth methods
+│   │   ├── tokens/         # PAT management
+│   │   ├── organizations/  # Org CRUD + membership
+│   │   ├── billing/        # Subscriptions, credits, payments, webhooks
+│   │   └── ai/             # AI inference proxy (11 providers + cost metering)
 │   ├── services/
+│   │   ├── db.service.ts       # Database operations (Prisma)
 │   │   ├── jwt.service.ts      # JWT generation/validation
+│   │   ├── token.service.ts    # PAT encryption/validation
 │   │   ├── email.service.ts    # Email sending (Resend)
-│   │   ├── sms.service.ts      # SMS sending (httpSMS)
-│   │   ├── db.service.ts       # Database operations
-│   │   └── crypto.service.ts   # Encryption/hashing
+│   │   ├── sms.service.ts      # SMS sending (Twilio)
+│   │   ├── oauth.service.ts    # OAuth provider flows
+│   │   ├── siwe.service.ts     # Sign-In with Ethereum
+│   │   ├── secrets.service.ts  # Infisical integration
+│   │   ├── rateLimiter.service.ts
+│   │   └── payments/           # Stripe, Stax, Relay providers
 │   ├── middleware/
 │   │   ├── auth.ts             # JWT verification middleware
 │   │   ├── ratelimit.ts        # Rate limiting
 │   │   └── cors.ts             # CORS configuration
-│   ├── models/
-│   │   ├── user.ts             # User model
-│   │   ├── session.ts          # Session model
-│   │   └── auth-method.ts      # Auth method model
 │   ├── utils/
+│   │   ├── crypto.ts           # Encryption/hashing, timing-safe compare
 │   │   ├── otp.ts              # OTP generation
+│   │   ├── logger.ts           # Structured logging
 │   │   └── validators.ts       # Input validation (Zod)
-│   └── index.ts                # Main entry point
-├── db/
-│   └── schema.sql              # Database schema
-├── tests/
-│   └── auth.test.ts            # Authentication tests
+│   └── index.ts                # Main entry point (Hono app)
+├── prisma/
+│   └── schema.prisma           # Database schema (PostgreSQL)
 ├── .env.example                # Environment variables template
-├── tsconfig.json               # TypeScript configuration
+├── tsconfig.json
 └── package.json
 ```
 
-## Deployment
+## Environment Variables
 
-This service is designed to be deployed as an **Alternate Futures Function**. Once the AF Functions platform is ready, you can deploy this authentication service directly through the platform.
+See `.env.example` for the full list. Key variables:
 
-### Deployment Steps (Coming Soon)
-
-1. Build the project: `npm run build`
-2. Deploy via AF Functions Dashboard
-3. Configure environment variables in AF Platform
-4. Set up custom domain (optional)
-
-The service will automatically scale and run on the AF Functions infrastructure.
-
-## Development
-
-This is a work in progress. See the implementation roadmap in the project documentation.
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `DATABASE_URL` | Yes | PostgreSQL connection string |
+| `JWT_SECRET` | Yes (production) | Access token signing secret — **process crashes if unset in production** |
+| `JWT_REFRESH_SECRET` | Yes (production) | Refresh token signing secret — **process crashes if unset in production** |
+| `RESEND_API_KEY` | Yes | Email delivery via Resend |
+| `TWILIO_ACCOUNT_SID` | For SMS | Twilio account SID |
+| `TWILIO_AUTH_TOKEN` | For SMS | Twilio auth token |
+| `TWILIO_PHONE_NUMBER` | For SMS | Twilio sender number |
+| `STRIPE_SECRET_KEY` | For billing | Stripe API key |
+| `STRIPE_WEBHOOK_SECRET` | For billing | Stripe webhook signing secret |
+| `TOKEN_ENCRYPTION_KEY` | Recommended | PAT encryption key (falls back to JWT_SECRET) |
+| `REDIS_URL` | Recommended | Redis for rate limiting (in-memory fallback warns in production) |
+| `INFISICAL_CLIENT_ID` | Production | Infisical secrets management |
 
 ## License
 
 MIT
-
----
-
-**Status**: In Development
-**Version**: 0.1.0
