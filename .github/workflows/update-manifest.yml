@@ -136,6 +136,7 @@ jobs:
               env:
                 - NODE_ENV=production
                 - PORT=3000
+                - DATABASE_URL=${{ secrets.AUTH_DATABASE_URL }}
                 - JWT_EXPIRES_IN=15m
                 - JWT_REFRESH_EXPIRES_IN=7d
                 - DOMAIN=alternatefutures.ai
