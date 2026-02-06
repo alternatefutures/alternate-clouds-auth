@@ -89,20 +89,27 @@ jobs:
 
       - name: Setup certificates
         env:
-          AKASH_CLIENT_CRT: ${{ secrets.AKASH_CLIENT_CRT }}
-          AKASH_CLIENT_KEY: ${{ secrets.AKASH_CLIENT_KEY }}
+          AKASH_NODE: https://rpc.akashnet.net:443
+          AKASH_CHAIN_ID: akashnet-2
         run: |
-          CERT_PATH="$HOME/.akash/certs"
-          mkdir -p "$CERT_PATH"
+          echo "Generating fresh certificate..."
+          akash tx cert generate client \
+            --from deploy \
+            --keyring-backend test
 
-          if [ -n "$AKASH_CLIENT_CRT" ] && [ -n "$AKASH_CLIENT_KEY" ]; then
-            echo "$AKASH_CLIENT_CRT" | base64 -d > "$CERT_PATH/client.crt"
-            echo "$AKASH_CLIENT_KEY" | base64 -d > "$CERT_PATH/client.key"
-            chmod 600 "$CERT_PATH/client.crt" "$CERT_PATH/client.key"
-          else
-            echo "::error::No certificates found in secrets."
-            exit 1
-          fi
+          echo "Publishing certificate to chain..."
+          akash tx cert publish client \
+            --from deploy \
+            --keyring-backend test \
+            --node $AKASH_NODE \
+            --chain-id $AKASH_CHAIN_ID \
+            --gas-prices 0.025uakt \
+            --gas auto \
+            --gas-adjustment 1.5 \
+            -y || echo "Certificate may already be published"
+
+          sleep 10
+          echo "Certificate setup complete"
 
       - name: Substitute secrets in SDL
         env:
