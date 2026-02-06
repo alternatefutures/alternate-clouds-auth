@@ -68,23 +68,24 @@ jobs:
 
       - name: Install Akash CLI and provider-services
         run: |
-          cd /tmp
-          curl -sfL "https://github.com/akash-network/node/releases/download/v1.0.2/akash_1.0.2_linux_amd64.zip" -o akash.zip
-          unzip akash.zip
-          sudo mv akash /usr/local/bin/
-          chmod +x /usr/local/bin/akash
+          # Install akash CLI (latest compatible with mainnet)
+          curl -sSfL https://raw.githubusercontent.com/akash-network/node/master/install.sh | sh -s -- -b /usr/local/bin
+          akash version
 
-          curl -sfL "https://github.com/akash-network/provider/releases/download/v0.6.9/provider-services_0.6.9_linux_amd64.zip" -o provider.zip
-          unzip provider.zip
-          sudo mv provider-services /usr/local/bin/
+          # Install provider-services CLI (latest release)
+          PROVIDER_VERSION=$(curl -s https://api.github.com/repos/akash-network/provider/releases/latest | jq -r '.tag_name')
+          echo "Installing provider-services ${PROVIDER_VERSION}"
+          curl -sSfL "https://github.com/akash-network/provider/releases/download/${PROVIDER_VERSION}/provider-services_linux_amd64.zip" -o /tmp/provider.zip
+          unzip -o /tmp/provider.zip -d /usr/local/bin/
           chmod +x /usr/local/bin/provider-services
 
       - name: Setup Akash wallet
         env:
           AKASH_MNEMONIC: ${{ secrets.AKASH_MNEMONIC }}
         run: |
-          echo "$AKASH_MNEMONIC" | akash keys add deploy --recover --keyring-backend test
-          AKASH_ADDRESS=$(akash keys show deploy -a --keyring-backend test)
+          mkdir -p "$HOME/.akash"
+          echo "$AKASH_MNEMONIC" | akash keys add deploy --recover --keyring-backend test --home "$HOME/.akash"
+          AKASH_ADDRESS=$(akash keys show deploy -a --keyring-backend test --home "$HOME/.akash")
           echo "AKASH_ADDRESS=$AKASH_ADDRESS" >> $GITHUB_ENV
 
       - name: Setup certificates
@@ -95,12 +96,21 @@ jobs:
           echo "Generating fresh certificate..."
           akash tx cert generate client \
             --from deploy \
-            --keyring-backend test
+            --keyring-backend test \
+            --home "$HOME/.akash"
+
+          if [ -n "${AKASH_ADDRESS:-}" ] && [ -f "$HOME/.akash/$AKASH_ADDRESS.pem" ]; then
+            echo "Certificate file generated at $HOME/.akash/$AKASH_ADDRESS.pem"
+          else
+            echo "Certificate file check skipped (address not in env yet) or not found."
+            ls -la "$HOME/.akash" || true
+          fi
 
           echo "Publishing certificate to chain..."
           akash tx cert publish client \
             --from deploy \
             --keyring-backend test \
+            --home "$HOME/.akash" \
             --node $AKASH_NODE \
             --chain-id $AKASH_CHAIN_ID \
             --gas-prices 0.025uakt \
