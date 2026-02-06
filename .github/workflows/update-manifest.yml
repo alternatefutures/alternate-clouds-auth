@@ -1,0 +1,165 @@
+name: Update Auth Manifest (No Redeploy)
+permissions:
+  contents: read
+
+# Sends a manifest update to the existing auth deployment on Akash.
+# Keeps the same DSEQ and ingress URL — NO DNS changes required.
+# Use this for code-only updates (new Docker image after push to main).
+#
+# For changes requiring new resources (CPU/RAM/storage), use deploy-akash.yml instead.
+
+on:
+  # Auto-trigger after successful Docker image build+push
+  workflow_run:
+    workflows: ["Build and Publish Docker Image"]
+    types:
+      - completed
+    branches: [main]
+
+  workflow_dispatch:
+    inputs:
+      sdl_file:
+        description: 'SDL file path (relative to service-cloud-api repo)'
+        required: false
+        default: 'deploy-mainnet.yaml'
+        type: string
+
+# NOTE: After the initial full redeploy, update these values with the new DSEQ and provider.
+# These are placeholders that MUST be set after step 5 of the redeployment.
+env:
+  # The DSEQ and provider will be set after the full redeploy.
+  # Update these after running the full deploy-akash.yml workflow.
+  AUTH_DSEQ: "UPDATE_AFTER_REDEPLOY"
+  AUTH_PROVIDER: "UPDATE_AFTER_REDEPLOY"
+
+concurrency:
+  group: akash-auth-manifest-update
+  cancel-in-progress: false
+
+jobs:
+  update-manifest:
+    runs-on: ubuntu-latest
+    environment: production
+    # Skip if triggered by workflow_run and the build failed
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
+
+    steps:
+      - name: Checkout service-auth
+        uses: actions/checkout@v4
+
+      - name: Checkout service-cloud-api SDL
+        uses: actions/checkout@v4
+        with:
+          repository: AlternateFutures/service-cloud-api
+          path: cloud-api
+          sparse-checkout: |
+            deploy-mainnet.yaml
+            deploy-mainnet-with-infisical.yaml
+
+      - name: Validate DSEQ is configured
+        run: |
+          if [ "${{ env.AUTH_DSEQ }}" == "UPDATE_AFTER_REDEPLOY" ]; then
+            echo "::error::AUTH_DSEQ has not been updated after the full redeploy."
+            echo "Update the env vars in this workflow file with the new DSEQ and provider."
+            exit 1
+          fi
+
+      - name: Install Akash CLI and provider-services
+        run: |
+          cd /tmp
+          curl -sfL "https://github.com/akash-network/node/releases/download/v1.0.2/akash_1.0.2_linux_amd64.zip" -o akash.zip
+          unzip akash.zip
+          sudo mv akash /usr/local/bin/
+          chmod +x /usr/local/bin/akash
+
+          curl -sfL "https://github.com/akash-network/provider/releases/download/v0.6.9/provider-services_0.6.9_linux_amd64.zip" -o provider.zip
+          unzip provider.zip
+          sudo mv provider-services /usr/local/bin/
+          chmod +x /usr/local/bin/provider-services
+
+      - name: Setup Akash wallet
+        env:
+          AKASH_MNEMONIC: ${{ secrets.AKASH_MNEMONIC }}
+        run: |
+          echo "$AKASH_MNEMONIC" | akash keys add deploy --recover --keyring-backend test
+          AKASH_ADDRESS=$(akash keys show deploy -a --keyring-backend test)
+          echo "AKASH_ADDRESS=$AKASH_ADDRESS" >> $GITHUB_ENV
+
+      - name: Setup certificates
+        env:
+          AKASH_CLIENT_CRT: ${{ secrets.AKASH_CLIENT_CRT }}
+          AKASH_CLIENT_KEY: ${{ secrets.AKASH_CLIENT_KEY }}
+        run: |
+          CERT_PATH="$HOME/.akash/certs"
+          mkdir -p "$CERT_PATH"
+
+          if [ -n "$AKASH_CLIENT_CRT" ] && [ -n "$AKASH_CLIENT_KEY" ]; then
+            echo "$AKASH_CLIENT_CRT" | base64 -d > "$CERT_PATH/client.crt"
+            echo "$AKASH_CLIENT_KEY" | base64 -d > "$CERT_PATH/client.key"
+            chmod 600 "$CERT_PATH/client.crt" "$CERT_PATH/client.key"
+          else
+            echo "::error::No certificates found in secrets."
+            exit 1
+          fi
+
+      - name: Substitute secrets in SDL
+        env:
+          YUGABYTE_PASSWORD: ${{ secrets.YUGABYTE_PASSWORD }}
+          JWT_SECRET: ${{ secrets.JWT_SECRET }}
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          ARWEAVE_WALLET: ${{ secrets.ARWEAVE_WALLET }}
+          FILECOIN_WALLET_KEY: ${{ secrets.FILECOIN_WALLET_KEY }}
+          SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+        run: |
+          cp cloud-api/deploy-mainnet.yaml deploy-final.yaml
+          sed -i "s|your_secure_password_here_change_this|$YUGABYTE_PASSWORD|g" deploy-final.yaml
+          sed -i "s|your_jwt_secret_min_32_chars_please_change_this_in_production|$JWT_SECRET|g" deploy-final.yaml
+          sed -i "s|your_resend_api_key|${RESEND_API_KEY:-placeholder}|g" deploy-final.yaml
+          sed -i "s|your_arweave_wallet|${ARWEAVE_WALLET:-placeholder}|g" deploy-final.yaml
+          sed -i "s|your_filecoin_wallet_key|${FILECOIN_WALLET_KEY:-placeholder}|g" deploy-final.yaml
+          sed -i "s|your_sentry_dsn|${SENTRY_DSN:-placeholder}|g" deploy-final.yaml
+
+      - name: Send manifest to provider
+        env:
+          AKASH_NODE: https://rpc.akashnet.net:443
+          AKASH_CHAIN_ID: akashnet-2
+          AKASH_KEYRING_BACKEND: test
+          AKASH_KEY_NAME: deploy
+          AKASH_FROM: deploy
+        run: |
+          echo "=== Sending Auth Manifest Update ==="
+          echo "DSEQ:     ${{ env.AUTH_DSEQ }}"
+          echo "Provider: ${{ env.AUTH_PROVIDER }}"
+
+          provider-services send-manifest deploy-final.yaml \
+            --dseq ${{ env.AUTH_DSEQ }} \
+            --provider ${{ env.AUTH_PROVIDER }} \
+            --from deploy \
+            --keyring-backend test \
+            --node $AKASH_NODE \
+            --chain-id $AKASH_CHAIN_ID \
+            --home $HOME/.akash
+
+          echo "Manifest sent successfully!"
+
+      - name: Health check
+        continue-on-error: true
+        run: |
+          echo "Waiting 30s for container update..."
+          sleep 30
+          curl -sf --max-time 30 https://auth.alternatefutures.ai/health || echo "Health check pending"
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "## Auth Manifest Update" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| **DSEQ** | ${{ env.AUTH_DSEQ }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Provider** | ${{ env.AUTH_PROVIDER }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Trigger** | ${{ github.event_name }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Same DSEQ, same ingress URL — no DNS update required." >> $GITHUB_STEP_SUMMARY
