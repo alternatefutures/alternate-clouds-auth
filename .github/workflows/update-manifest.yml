@@ -17,12 +17,6 @@ on:
     branches: [main]
 
   workflow_dispatch:
-    inputs:
-      sdl_file:
-        description: 'SDL file path (relative to service-cloud-api repo)'
-        required: false
-        default: 'deploy-mainnet.yaml'
-        type: string
 
 # NOTE: After the initial full redeploy, update these values with the new DSEQ and provider.
 # These are placeholders that MUST be set after step 5 of the redeployment.
@@ -48,15 +42,6 @@ jobs:
     steps:
       - name: Checkout service-auth
         uses: actions/checkout@v4
-
-      - name: Checkout service-cloud-api SDL
-        uses: actions/checkout@v4
-        with:
-          repository: AlternateFutures/service-cloud-api
-          path: cloud-api
-          sparse-checkout: |
-            deploy-mainnet.yaml
-            deploy-mainnet-with-infisical.yaml
 
       - name: Validate DSEQ is configured
         run: |
@@ -121,22 +106,85 @@ jobs:
           sleep 10
           echo "Certificate setup complete"
 
-      - name: Substitute secrets in SDL
-        env:
-          YUGABYTE_PASSWORD: ${{ secrets.YUGABYTE_PASSWORD }}
-          JWT_SECRET: ${{ secrets.JWT_SECRET }}
-          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
-          ARWEAVE_WALLET: ${{ secrets.ARWEAVE_WALLET }}
-          FILECOIN_WALLET_KEY: ${{ secrets.FILECOIN_WALLET_KEY }}
-          SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+      - name: Prepare auth SDL
         run: |
-          cp cloud-api/deploy-mainnet.yaml deploy-final.yaml
-          sed -i "s|your_secure_password_here_change_this|$YUGABYTE_PASSWORD|g" deploy-final.yaml
-          sed -i "s|your_jwt_secret_min_32_chars_please_change_this_in_production|$JWT_SECRET|g" deploy-final.yaml
-          sed -i "s|your_resend_api_key|${RESEND_API_KEY:-placeholder}|g" deploy-final.yaml
-          sed -i "s|your_arweave_wallet|${ARWEAVE_WALLET:-placeholder}|g" deploy-final.yaml
-          sed -i "s|your_filecoin_wallet_key|${FILECOIN_WALLET_KEY:-placeholder}|g" deploy-final.yaml
-          sed -i "s|your_sentry_dsn|${SENTRY_DSN:-placeholder}|g" deploy-final.yaml
+          # Use latest image from main branch
+          SHORT_SHA="${GITHUB_SHA::7}"
+          IMAGE_TAG="main-${SHORT_SHA}"
+          echo "Using image tag: $IMAGE_TAG"
+
+          # Generate the same SDL structure used by deploy-akash.yml
+          # The profiles/placement/deployment sections MUST match the on-chain deployment
+          cat > deploy-final.yaml << EOF
+          ---
+          version: "2.0"
+
+          services:
+            auth-api:
+              image: ghcr.io/alternatefutures/service-auth:${IMAGE_TAG}
+              credentials:
+                host: ghcr.io
+                username: alternatefutures
+                password: "${{ secrets.GHCR_PAT }}"
+              expose:
+                - port: 3000
+                  as: 80
+                  to:
+                    - global: true
+                  accept:
+                    - auth.alternatefutures.ai
+              env:
+                - NODE_ENV=production
+                - PORT=3000
+                - JWT_EXPIRES_IN=15m
+                - JWT_REFRESH_EXPIRES_IN=7d
+                - DOMAIN=alternatefutures.ai
+                - APP_URL=https://auth.alternatefutures.ai
+                - FRONTEND_URL=https://app.alternatefutures.ai
+                - CORS_ORIGIN=https://app.alternatefutures.ai
+                - GOOGLE_REDIRECT_URI=https://auth.alternatefutures.ai/auth/oauth/callback/google
+                - GITHUB_REDIRECT_URI=https://auth.alternatefutures.ai/auth/oauth/callback/github
+                - TWITTER_REDIRECT_URI=https://auth.alternatefutures.ai/auth/oauth/callback/twitter
+                - DISCORD_REDIRECT_URI=https://auth.alternatefutures.ai/auth/oauth/callback/discord
+                - INFISICAL_SITE_URL=https://ddchr1pel5e0p8i0c46drjpclg.ingress.europlots.com
+                - INFISICAL_CLIENT_ID=${{ secrets.INFISICAL_CLIENT_ID }}
+                - INFISICAL_CLIENT_SECRET=${{ secrets.INFISICAL_CLIENT_SECRET }}
+                - INFISICAL_PROJECT_ID=${{ secrets.INFISICAL_PROJECT_ID }}
+                - INFISICAL_GLOBAL_PROJECT_ID=${{ secrets.INFISICAL_GLOBAL_PROJECT_ID }}
+                - INFISICAL_ENVIRONMENT=prod
+
+          profiles:
+            compute:
+              auth-api:
+                resources:
+                  cpu:
+                    units: 1.0
+                  memory:
+                    size: 1Gi
+                  storage:
+                    - size: 1Gi
+
+            placement:
+              akash:
+                attributes:
+                  host: akash
+                signedBy:
+                  anyOf:
+                    - "akash1365yvmc4s7awdyj3n2sav7xfx76adc6dnmlx63"
+                pricing:
+                  auth-api:
+                    denom: uakt
+                    amount: 100
+
+          deployment:
+            auth-api:
+              akash:
+                profile: auth-api
+                count: 1
+          EOF
+
+          echo "Auth SDL prepared:"
+          cat deploy-final.yaml
 
       - name: Send manifest to provider
         env:
