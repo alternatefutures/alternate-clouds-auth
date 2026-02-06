@@ -139,7 +139,6 @@ jobs:
             --from deploy \
             --keyring-backend test \
             --node $AKASH_NODE \
-            --chain-id $AKASH_CHAIN_ID \
             --home $HOME/.akash
 
           echo "Manifest sent successfully!"
