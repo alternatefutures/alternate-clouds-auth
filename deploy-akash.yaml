@@ -9,7 +9,8 @@ version: "2.0"
 
 services:
   auth-api:
-    image: ghcr.io/alternatefutures/auth-service:latest
+    # NOTE: This must match the image name used by CI (see `.github/workflows/deploy-akash.yml`)
+    image: ghcr.io/alternatefutures/service-auth:latest
     credentials:
       host: ghcr.io
       username: alternatefutures
