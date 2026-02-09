@@ -9,16 +9,14 @@ The auth service runs on Akash Network with automated CI/CD via GitHub Actions. 
 | `deploy-akash.yml` | Resource changes (CPU/RAM/storage), fresh start | Creates a **new** deployment with a new DSEQ. Requires updating `update-manifest.yml` with the new DSEQ/provider. |
 | `update-manifest.yml` | Code changes (new image) | Updates the **existing** deployment in-place. Runs automatically after Docker image build, or manually. No DNS changes needed. |
 
-## Current Deployment
+## Current deployment state (source of truth)
 
-| Field | Value |
-|-------|-------|
-| **DSEQ** | 25412621 |
-| **Provider** | `akash1xmjzu9dczlg9fa4v3pfvwzn7ty89r003laj4ac` (tagus.host) |
-| **Domain** | auth.alternatefutures.ai |
-| **Resources** | 1 CPU, 1Gi RAM, 1Gi storage |
-| **Image** | `ghcr.io/alternatefutures/service-auth:main-<sha>` |
-| **SSL** | Via SSL proxy (Pingap) at 77.76.13.213 |
+This guide explains **how** to deploy/update `service-auth`.
+
+For the **current** production DSEQ/provider/IP/endpoints, see:
+
+- `DEPLOYMENTS.md` (repo root)
+- `.github/DEPLOYMENTS.md` (repo root)
 
 ## How CI/CD Works
 
@@ -56,8 +54,8 @@ This workflow runs automatically after every successful Docker image build on `m
 In `.github/workflows/update-manifest.yml`:
 ```yaml
 env:
-  AUTH_DSEQ: "25412621"        # ← Update with new DSEQ
-  AUTH_PROVIDER: "akash1xmj..."  # ← Update with new provider
+  AUTH_DSEQ: "<see repo-root .github/DEPLOYMENTS.md>"        # ← Update with new DSEQ
+  AUTH_PROVIDER: "<see repo-root .github/DEPLOYMENTS.md>"    # ← Update with new provider
 ```
 
 ## Full Redeploy (deploy-akash.yml)
@@ -89,7 +87,12 @@ Use this when you need to change compute resources (CPU, RAM, storage) or start 
 
 ## Environment Variables
 
-The auth service uses [Infisical](https://secrets.alternatefutures.ai) for runtime secrets. The following are set in the Akash SDL:
+The auth service supports **two** secrets modes:
+
+1) **Infisical runtime secrets (recommended)**: services fetch secrets at startup via `INFISICAL_*`.
+2) **Direct SDL env injection**: used by `akash-mcp/scripts/redeploy-all.ts` when Infisical is intentionally skipped (e.g. recovery / simplified deployment).
+
+The following are set in the Akash SDL:
 
 ### Set in SDL (non-sensitive):
 - `NODE_ENV=production`
@@ -112,7 +115,7 @@ The auth service uses [Infisical](https://secrets.alternatefutures.ai) for runti
 ```
 User → auth.alternatefutures.ai
      → Cloudflare (DNS proxy)
-     → 77.76.13.213 (SSL proxy on Akash, Pingap)
+     → (SSL proxy on Akash, Pingap; see repo-root deployment tracker for current IP)
      → Akash provider ingress (service-auth container)
 ```
 
@@ -127,7 +130,7 @@ curl https://auth.alternatefutures.ai/health
 
 ### View logs (via Akash Console):
 ```
-https://deploy.cloudmos.io/deployment/akash1degudmhf24auhfnqtn99mkja3xt7clt9um77tn/25412621
+https://deploy.cloudmos.io/deployment/akash1degudmhf24auhfnqtn99mkja3xt7clt9um77tn/<DSEQ>
 ```
 
 ### View deployment status:
@@ -145,7 +148,7 @@ The SDL sent by `update-manifest.yml` must match the on-chain deployment spec. T
 Version mismatch between `akash` and `provider-services`. Both workflows install the latest versions to avoid this.
 
 ### 522 Cloudflare timeout
-The SSL proxy at 77.76.13.213 is down or misconfigured. Check the `infrastructure-proxy` deployment.
+The SSL proxy is down or misconfigured. Check the `infrastructure-proxy` deployment (see repo-root deployment tracker for current DSEQ/IP).
 
 ### Container not starting
 Check logs in Akash Console. Common causes:

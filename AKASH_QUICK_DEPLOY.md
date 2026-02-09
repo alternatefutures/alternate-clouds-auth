@@ -53,12 +53,12 @@ Update `DEPLOYMENTS.md` (root) and `.github/DEPLOYMENTS.md` with the new DSEQ.
 
 ## Current Deployment
 
-| Field | Value |
-|-------|-------|
-| **DSEQ** | 25412621 |
-| **Provider** | akash1xmjzu9dczlg9fa4v3pfvwzn7ty89r003laj4ac |
-| **URL** | https://auth.alternatefutures.ai |
-| **Console** | [View on Cloudmos](https://deploy.cloudmos.io/deployment/akash1degudmhf24auhfnqtn99mkja3xt7clt9um77tn/25412621) |
+Do not hardcode DSEQs/providers in this file (they drift).
+
+See the repo-root deployment trackers for current values:
+
+- `DEPLOYMENTS.md`
+- `.github/DEPLOYMENTS.md`
 
 ## Verify Deployment
 
