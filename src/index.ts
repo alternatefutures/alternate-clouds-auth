@@ -4,6 +4,7 @@ import { logger } from 'hono/logger';
 import { corsMiddleware, devCorsMiddleware } from './middleware/cors';
 import { secretsService } from './services/secrets.service';
 import { initializePaymentProviders } from './services/payments';
+import { dbService } from './services/db.service';
 import authRoutes from './routes/auth';
 import accountRoutes from './routes/account';
 import tokensRoutes from './routes/tokens';
@@ -49,6 +50,17 @@ app.get('/health', (c) => {
     version: '0.1.0',
     timestamp: new Date().toISOString(),
   });
+});
+
+// Database health check — verifies DB connectivity, schema integrity, and seed data
+app.get('/health/db', async (c) => {
+  const result = await dbService.healthCheck();
+  const httpStatus = result.status === 'error' ? 503 : 200;
+  return c.json({
+    ...result,
+    service: 'alternatefutures-auth',
+    timestamp: new Date().toISOString(),
+  }, httpStatus);
 });
 
 // Root endpoint

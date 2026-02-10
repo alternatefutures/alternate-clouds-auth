@@ -477,6 +477,49 @@ export class DatabaseService {
   }
 
   /**
+   * Health check: verify DB connectivity, count tables and subscription plans.
+   * Used by /health/db endpoint.
+   */
+  async healthCheck(): Promise<{
+    status: 'ok' | 'degraded' | 'error';
+    db: boolean;
+    plans: number;
+    tables: number;
+    latencyMs: number;
+    error?: string;
+  }> {
+    const start = Date.now();
+    try {
+      // Verify connectivity with a simple query
+      await this.prisma.$queryRawUnsafe('SELECT 1');
+      const dbOk = true;
+
+      // Count subscription plans
+      const plans = await this.prisma.subscriptionPlan.count();
+
+      // Count tables in the database (PostgreSQL-specific)
+      const tableResult = await this.prisma.$queryRawUnsafe<{ count: bigint }[]>(
+        `SELECT COUNT(*) as count FROM information_schema.tables WHERE table_schema = 'public' AND table_type = 'BASE TABLE'`
+      );
+      const tables = Number(tableResult[0]?.count ?? 0);
+
+      const latencyMs = Date.now() - start;
+      const status = plans > 0 && tables > 3 ? 'ok' : 'degraded';
+
+      return { status, db: dbOk, plans, tables, latencyMs };
+    } catch (e: any) {
+      return {
+        status: 'error',
+        db: false,
+        plans: 0,
+        tables: 0,
+        latencyMs: Date.now() - start,
+        error: e.message || String(e),
+      };
+    }
+  }
+
+  /**
    * Close database connection
    */
   async close(): Promise<void> {

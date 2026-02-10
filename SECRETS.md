@@ -2,11 +2,7 @@
 
 This document lists all environment variables required for `service-auth`.
 
-## Infisical Path
-
-```
-/production/service-auth/
-```
+All secrets are injected directly as SDL environment variables by `akash-mcp/scripts/redeploy-all.ts` at deploy time. No external secrets manager (Infisical, etc.) is used.
 
 ## Required Variables
 
@@ -83,38 +79,20 @@ This supports clean isolation for multi-tenant deployments and independent backu
 
 ### Akash Deployment
 
-| Field | Value |
-|-------|-------|
-| **DSEQ** | `24677103` |
-| **Provider** | `akash18ga02jzaq8cw52anyhzkwta5wygufgu6zsz6xc` (europlots) |
-| **Host** | `provider.europlots.com` |
-| **Port** | `31568` |
-| **Database** | `auth` |
-| **User** | `auth` |
-| **Resources** | 0.5 CPU, 512Mi RAM, 5Gi persistent storage |
-| **SDL** | `infra/postgres-standalone.yaml` |
+PostgreSQL is deployed as a shared server on Akash via `redeploy-all.ts`. Auth uses a **dedicated database** (`alternatefutures_auth`) on this server, separate from cloud-api.
 
-### 1Password Storage
+For current DSEQ, provider, host, and port, see:
+- **`DEPLOYMENTS.md`** (repo root) — updated automatically by each `redeploy-all.ts` run
+- **`.env.deploy`** (in `akash-mcp/`) — contains `AUTH_DATABASE_URL` and `API_DATABASE_URL`
 
-The PostgreSQL admin credentials should be stored in 1Password:
+### AKASH_CERT_JSON
 
-| Item Name | Field | Description |
-|-----------|-------|-------------|
-| `Alternate Auth PostgreSQL` | `password` | Admin password for postgres user |
-| `Alternate Auth PostgreSQL` | `host` | Database host (`provider.europlots.com`) |
-| `Alternate Auth PostgreSQL` | `port` | Database port (`31568`) |
-| `Alternate Auth PostgreSQL` | `connection_string` | Full DATABASE_URL |
-| `Alternate Auth PostgreSQL` | `dseq` | Akash deployment sequence number (`24677103`) |
-| `Alternate Auth PostgreSQL` | `provider` | Akash provider address |
+The `redeploy-all.ts` script injects `AKASH_CERT_JSON` (base64-encoded certificate JSON) into the cloud-api deployment. This allows the embedded akash-mcp subprocess to operate without regenerating certificates.
 
-**Note:** This is a dedicated database for service-auth only.
-Do NOT confuse with `Alternate Cloud PostgreSQL` (service-cloud-api) or Infisical's internal PostgreSQL.
-
-### Infisical Configuration
-
-In Infisical, the DATABASE_URL should be set in:
-- **Path:** `/service-auth/DATABASE_URL`
-- **Value:** `postgresql://auth:PASSWORD@provider.europlots.com:31568/auth`
+To set this up manually:
+1. Export your Akash certificate: `{ "cert": "...", "publicKey": "...", "privateKey": "..." }`
+2. Base64-encode it: `echo '<json>' | base64`
+3. Set as `AKASH_CERT_JSON` environment variable
 
 ## Example .env
 

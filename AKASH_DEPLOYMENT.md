@@ -77,21 +77,12 @@ Use this when you need to change compute resources (CPU, RAM, storage) or start 
 |--------|-------------|
 | `AKASH_MNEMONIC` | Wallet mnemonic for `akash1degudmhf24auhfnqtn99mkja3xt7clt9um77tn` |
 | `GHCR_PAT` | GitHub Container Registry personal access token |
-| `INFISICAL_CLIENT_ID` | Infisical machine identity client ID |
-| `INFISICAL_CLIENT_SECRET` | Infisical machine identity client secret |
-| `INFISICAL_PROJECT_ID` | Infisical project ID for service-auth |
-| `INFISICAL_GLOBAL_PROJECT_ID` | Infisical global project ID |
 
-> **Note:** Database credentials, JWT secrets, Resend API key, and OAuth secrets are fetched from Infisical at runtime — they do NOT need to be in GitHub Secrets.
+> **Note:** Database credentials, JWT secrets, Resend API key, and other runtime secrets are injected directly as SDL environment variables by `akash-mcp/scripts/redeploy-all.ts`. No external secrets manager is used.
 
 ## Environment Variables
 
-The auth service supports **two** secrets modes:
-
-1) **Infisical runtime secrets (recommended)**: services fetch secrets at startup via `INFISICAL_*`.
-2) **Direct SDL env injection**: used by `akash-mcp/scripts/redeploy-all.ts` when Infisical is intentionally skipped (e.g. recovery / simplified deployment).
-
-The following are set in the Akash SDL:
+All secrets are injected directly as SDL environment variables by `akash-mcp/scripts/redeploy-all.ts` at deploy time.
 
 ### Set in SDL (non-sensitive):
 - `NODE_ENV=production`
@@ -101,13 +92,13 @@ The following are set in the Akash SDL:
 - `FRONTEND_URL=https://app.alternatefutures.ai`
 - `CORS_ORIGIN=https://app.alternatefutures.ai`
 - OAuth redirect URIs
-- Infisical credentials (from GitHub Secrets)
 
-### Fetched from Infisical at runtime:
-- `DATABASE_URL` (PostgreSQL connection string)
+### Injected by redeploy-all.ts (secrets):
+- `DATABASE_URL` (PostgreSQL connection string — dedicated `alternatefutures_auth` database)
 - `JWT_SECRET` / `JWT_REFRESH_SECRET`
 - `RESEND_API_KEY`
-- OAuth client IDs and secrets (Google, GitHub, Twitter, Discord)
+- `STRIPE_SECRET_KEY`
+- `OPENAI_API_KEY`
 
 ## SSL Architecture
 
@@ -151,8 +142,8 @@ The SSL proxy is down or misconfigured. Check the `infrastructure-proxy` deploym
 
 ### Container not starting
 Check logs in Akash Console. Common causes:
-- Missing Infisical credentials (check GitHub Secrets)
-- Database not reachable (check Infisical `DATABASE_URL`)
+- Missing environment variables (check `redeploy-all.ts` SDL injection)
+- Database not reachable (verify PostgreSQL deployment and `DATABASE_URL`)
 - Image not found (check GHCR for the expected tag)
 
 ## Cost
@@ -162,4 +153,4 @@ Check logs in Akash Console. Common causes:
 
 ---
 
-*Last updated: 2026-02-06*
+*Last updated: 2026-02-10*
