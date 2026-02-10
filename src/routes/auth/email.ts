@@ -128,6 +128,7 @@ app.post('/verify', strictRateLimit, async (c) => {
       const orgName = email.split('@')[0] || 'My Organization';
       
       try {
+        console.log(`[org-create] Creating default org for NEW user ${user.id}...`);
         await dbService.createDefaultOrganizationForUser({
           orgId: nanoid(),
           memberId: nanoid(),
@@ -138,8 +139,10 @@ app.post('/verify', strictRateLimit, async (c) => {
           orgSlug,
           orgName: `${orgName}'s Org`,
         });
-      } catch (orgError) {
-        console.error('Failed to create default org for new user:', orgError);
+        console.log(`[org-create] ✓ Default org created for user ${user.id}`);
+      } catch (orgError: any) {
+        console.error(`[org-create] ✖ Failed for new user ${user.id}:`, orgError?.message || orgError);
+        console.error(`[org-create]   Code: ${orgError?.code}, Meta: ${JSON.stringify(orgError?.meta)}`);
       }
     } else {
       // Update email verification status
@@ -156,6 +159,7 @@ app.post('/verify', strictRateLimit, async (c) => {
         const orgName = email.split('@')[0] || 'My Organization';
         
         try {
+          console.log(`[org-create] Creating default org for EXISTING user ${user.id} (0 orgs)...`);
           await dbService.createDefaultOrganizationForUser({
             orgId: nanoid(),
             memberId: nanoid(),
@@ -166,8 +170,10 @@ app.post('/verify', strictRateLimit, async (c) => {
             orgSlug,
             orgName: `${orgName}'s Org`,
           });
-        } catch (orgError) {
-          console.error('Failed to create default org for existing user:', orgError);
+          console.log(`[org-create] ✓ Default org created for existing user ${user.id}`);
+        } catch (orgError: any) {
+          console.error(`[org-create] ✖ Failed for existing user ${user.id}:`, orgError?.message || orgError);
+          console.error(`[org-create]   Code: ${orgError?.code}, Meta: ${JSON.stringify(orgError?.meta)}`);
         }
       }
     }

@@ -1508,8 +1508,10 @@ export class DatabaseService {
       })
     );
 
-    // Execute transaction
-    const [org] = await this.prisma.$transaction(operations);
+    // Execute transaction (generous timeout for high-latency Akash → remote DB connections)
+    const [org] = await this.prisma.$transaction(operations, {
+      timeout: 30000, // 30s (default is 5s, too tight for cross-datacenter Akash deploys)
+    });
 
     return {
       id: org.id,
