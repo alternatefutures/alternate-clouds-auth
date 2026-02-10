@@ -187,13 +187,16 @@ export interface PaymentMethod {
   updated_at: number;
 }
 
-export type SubscriptionPlanName = 'FREE' | 'STARTER' | 'PRO' | 'ENTERPRISE';
+export type SubscriptionPlanName = 'MONTHLY' | 'YEARLY' | string; // legacy: FREE, STARTER, PRO, ENTERPRISE
+export type BillingInterval = 'MONTHLY' | 'YEARLY';
 
 export interface SubscriptionPlan {
   id: string;
   name: SubscriptionPlanName;
   base_price_per_seat: number;
   usage_markup: number;
+  billing_interval: BillingInterval;
+  is_active: boolean;
   features?: string;
   stripe_price_id?: string;
   included_storage_gb: number;
@@ -429,8 +432,9 @@ export interface OrganizationUsageCostsPrivate {
   created_at: number;
 }
 
-// Usage billing constants (configurable via env)
-export const USAGE_MARGIN_RATE = parseFloat(process.env.USAGE_MARGIN_RATE || '0.5'); // 50% margin
+// Default usage margin rate — used as fallback when org has no active subscription.
+// Per-plan markup (from SubscriptionPlan.usageMarkup) is preferred; see costMetering.ts.
+export const USAGE_MARGIN_RATE = parseFloat(process.env.USAGE_MARGIN_RATE || '0.25'); // 25% default
 
 // ============================================
 // HELPER FUNCTIONS
@@ -480,75 +484,18 @@ export class DatabaseService {
   }
 
   /**
-   * Seed default subscription plans if they don't exist
+   * Verify subscription plans exist on startup.
+   * Plans are seeded externally via `npm run db:seed` (scripts/seed-plans.ts).
+   * This method only logs a warning if no active plans are found.
    */
   private async seedDefaultPlans(): Promise<void> {
-    const plans = [
-      {
-        id: 'plan_free',
-        name: 'FREE',
-        basePricePerSeat: 0,
-        usageMarkup: 0.2, // 20% markup on overage
-        features: JSON.stringify(['1 project', 'Community support']),
-        includedStorageGb: 1,
-        includedBandwidthGb: 10,
-        includedInvocations: 10000,
-        includedComputeSeconds: 10000,
-        trialDays: 0, // Free doesn't need trial
-      },
-      {
-        id: 'plan_starter',
-        name: 'STARTER',
-        basePricePerSeat: 2000, // $20 in cents
-        usageMarkup: 0.1, // 10% markup on overage
-        features: JSON.stringify(['10 projects', 'Email support', 'Team collaboration']),
-        includedStorageGb: 10,
-        includedBandwidthGb: 100,
-        includedInvocations: 500000,
-        includedComputeSeconds: 100000,
-        trialDays: 30,
-      },
-      {
-        id: 'plan_pro',
-        name: 'PRO',
-        basePricePerSeat: 4900, // $49 in cents
-        usageMarkup: 0, // No markup on overage
-        features: JSON.stringify(['Unlimited projects', 'Priority support', 'Advanced analytics', 'Custom domains']),
-        includedStorageGb: 100,
-        includedBandwidthGb: 1000,
-        includedInvocations: 5000000,
-        includedComputeSeconds: 1000000,
-        trialDays: 14,
-      },
-      {
-        id: 'plan_enterprise',
-        name: 'ENTERPRISE',
-        basePricePerSeat: 0, // Custom pricing
-        usageMarkup: -0.1, // 10% discount on usage
-        features: JSON.stringify(['Custom limits', 'SLA', 'Dedicated support', 'SSO', 'Audit logs']),
-        includedStorageGb: 0, // Custom
-        includedBandwidthGb: 0, // Custom
-        includedInvocations: 0, // Custom
-        includedComputeSeconds: 0, // Custom
-        trialDays: 0, // Custom
-      },
-    ];
-
-    for (const plan of plans) {
-      await this.prisma.subscriptionPlan.upsert({
-        where: { id: plan.id },
-        update: {
-          basePricePerSeat: plan.basePricePerSeat,
-          usageMarkup: plan.usageMarkup,
-          features: plan.features,
-          includedStorageGb: plan.includedStorageGb,
-          includedBandwidthGb: plan.includedBandwidthGb,
-          includedInvocations: plan.includedInvocations,
-          includedComputeSeconds: plan.includedComputeSeconds,
-          trialDays: plan.trialDays,
-        },
-        create: plan,
-      });
+    const count = await this.prisma.subscriptionPlan.count({
+      where: { isActive: true },
+    });
+    if (count === 0) {
+      console.warn(
+        '⚠️  No active subscription plans found. Run: npm run db:seed'
+      );
     }
   }
 
@@ -1476,16 +1423,19 @@ export class DatabaseService {
     const { orgId, memberId, billingId, billingCustomerId, subscriptionId, userId, orgSlug, orgName } = params;
 
     const now = new Date();
-    const trialEndsAt = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000); // 30 days
-    const periodEnd = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
 
-    // Look up the STARTER plan for trial
-    const starterPlan = await this.prisma.subscriptionPlan.findUnique({
-      where: { name: 'STARTER' },
+    // Look up the default trial plan (MONTHLY, or first active plan)
+    const defaultPlan = await this.prisma.subscriptionPlan.findFirst({
+      where: { isActive: true },
+      orderBy: { basePricePerSeat: 'asc' },
     });
-    if (!starterPlan) {
-      throw new Error('STARTER plan not found. Please run the seed script.');
+    if (!defaultPlan) {
+      throw new Error('No active subscription plan found. Run: npm run db:seed');
     }
+
+    const trialDays = defaultPlan.trialDays || 7;
+    const trialEndsAt = new Date(now.getTime() + trialDays * 24 * 60 * 60 * 1000);
+    const periodEnd = new Date(now.getTime() + trialDays * 24 * 60 * 60 * 1000);
 
     // Check if user already has a BillingCustomer (edge case: existing user adding via new auth method)
     const existingBillingCustomer = await this.prisma.billingCustomer.findUnique({
@@ -1548,7 +1498,7 @@ export class DatabaseService {
           id: subscriptionId,
           customerId: actualBillingCustomerId, // Use existing or new BillingCustomer
           orgBillingId: billingId, // Optional FK to OrganizationBilling
-          planId: starterPlan.id, // Use actual plan ID from database
+          planId: defaultPlan.id, // Use cheapest active plan for trial
           status: 'TRIALING',
           seats: 1,
           currentPeriodStart: now,
@@ -1827,15 +1777,20 @@ export class DatabaseService {
   // SUBSCRIPTION PLAN METHODS
   // ============================================
 
-  async getSubscriptionPlanByName(name: string): Promise<SubscriptionPlan | null> {
-    const result = await this.prisma.subscriptionPlan.findUnique({ where: { name } });
-    if (!result) return null;
-
+  private serializePlan(result: {
+    id: string; name: string; basePricePerSeat: number; usageMarkup: number;
+    billingInterval: string; isActive: boolean; features: string | null;
+    stripePriceId: string | null; includedStorageGb: number; includedBandwidthGb: number;
+    includedInvocations: number; includedComputeSeconds: number; trialDays: number;
+    createdAt: Date; updatedAt: Date;
+  }): SubscriptionPlan {
     return {
       id: result.id,
       name: result.name as SubscriptionPlanName,
       base_price_per_seat: result.basePricePerSeat,
       usage_markup: result.usageMarkup,
+      billing_interval: result.billingInterval as BillingInterval,
+      is_active: result.isActive,
       features: result.features ?? undefined,
       stripe_price_id: result.stripePriceId ?? undefined,
       included_storage_gb: result.includedStorageGb,
@@ -1848,24 +1803,18 @@ export class DatabaseService {
     };
   }
 
-  async getAllSubscriptionPlans(): Promise<SubscriptionPlan[]> {
-    const results = await this.prisma.subscriptionPlan.findMany();
+  async getSubscriptionPlanByName(name: string): Promise<SubscriptionPlan | null> {
+    const result = await this.prisma.subscriptionPlan.findUnique({ where: { name } });
+    if (!result) return null;
+    return this.serializePlan(result);
+  }
 
-    return results.map((result) => ({
-      id: result.id,
-      name: result.name as SubscriptionPlanName,
-      base_price_per_seat: result.basePricePerSeat,
-      usage_markup: result.usageMarkup,
-      features: result.features ?? undefined,
-      stripe_price_id: result.stripePriceId ?? undefined,
-      included_storage_gb: result.includedStorageGb,
-      included_bandwidth_gb: result.includedBandwidthGb,
-      included_invocations: result.includedInvocations,
-      included_compute_seconds: result.includedComputeSeconds,
-      trial_days: result.trialDays,
-      created_at: result.createdAt.getTime(),
-      updated_at: result.updatedAt.getTime(),
-    }));
+  async getAllSubscriptionPlans(): Promise<SubscriptionPlan[]> {
+    const results = await this.prisma.subscriptionPlan.findMany({
+      where: { isActive: true },
+      orderBy: { basePricePerSeat: 'asc' },
+    });
+    return results.map((r) => this.serializePlan(r));
   }
 
   async listSubscriptionPlans(): Promise<SubscriptionPlan[]> {
@@ -1875,22 +1824,21 @@ export class DatabaseService {
   async getSubscriptionPlanById(id: string): Promise<SubscriptionPlan | null> {
     const result = await this.prisma.subscriptionPlan.findUnique({ where: { id } });
     if (!result) return null;
+    return this.serializePlan(result);
+  }
 
-    return {
-      id: result.id,
-      name: result.name as SubscriptionPlanName,
-      base_price_per_seat: result.basePricePerSeat,
-      usage_markup: result.usageMarkup,
-      features: result.features ?? undefined,
-      stripe_price_id: result.stripePriceId ?? undefined,
-      included_storage_gb: result.includedStorageGb,
-      included_bandwidth_gb: result.includedBandwidthGb,
-      included_invocations: result.includedInvocations,
-      included_compute_seconds: result.includedComputeSeconds,
-      trial_days: result.trialDays,
-      created_at: result.createdAt.getTime(),
-      updated_at: result.updatedAt.getTime(),
-    };
+  /**
+   * Get the usage markup rate for an org based on their active subscription plan.
+   * Returns the plan's usageMarkup, or the global USAGE_MARGIN_RATE fallback.
+   */
+  async getUsageMarkupForOrg(orgBillingId: string): Promise<number> {
+    const sub = await this.getSubscriptionByOrgBillingId(orgBillingId);
+    if (!sub) return USAGE_MARGIN_RATE;
+
+    const plan = await this.getSubscriptionPlanById(sub.plan_id);
+    if (!plan) return USAGE_MARGIN_RATE;
+
+    return plan.usage_markup;
   }
 
   // ============================================

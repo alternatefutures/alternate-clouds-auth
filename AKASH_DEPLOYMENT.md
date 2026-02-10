@@ -16,7 +16,6 @@ This guide explains **how** to deploy/update `service-auth`.
 For the **current** production DSEQ/provider/IP/endpoints, see:
 
 - `DEPLOYMENTS.md` (repo root)
-- `.github/DEPLOYMENTS.md` (repo root)
 
 ## How CI/CD Works
 
@@ -54,8 +53,8 @@ This workflow runs automatically after every successful Docker image build on `m
 In `.github/workflows/update-manifest.yml`:
 ```yaml
 env:
-  AUTH_DSEQ: "<see repo-root .github/DEPLOYMENTS.md>"        # ← Update with new DSEQ
-  AUTH_PROVIDER: "<see repo-root .github/DEPLOYMENTS.md>"    # ← Update with new provider
+  AUTH_DSEQ: "<see repo-root DEPLOYMENTS.md>"        # ← Update with new DSEQ
+  AUTH_PROVIDER: "<see repo-root DEPLOYMENTS.md>"    # ← Update with new provider
 ```
 
 ## Full Redeploy (deploy-akash.yml)

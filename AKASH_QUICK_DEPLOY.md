@@ -38,7 +38,7 @@ git push origin main
 ```
 
 ### 5. Update docs
-Update `DEPLOYMENTS.md` (root) and `.github/DEPLOYMENTS.md` with the new DSEQ.
+Update `DEPLOYMENTS.md` (repo root) with the new DSEQ.
 
 ## Required GitHub Secrets
 
@@ -58,7 +58,6 @@ Do not hardcode DSEQs/providers in this file (they drift).
 See the repo-root deployment trackers for current values:
 
 - `DEPLOYMENTS.md`
-- `.github/DEPLOYMENTS.md`
 
 ## Verify Deployment
 

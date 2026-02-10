@@ -43,20 +43,26 @@ export type OutputCostCalculationFn = (
 // ============================================
 
 /**
- * Calculate USD to charge with margin
- * Formula: usdCharged = usdCostRaw / (1 - MARGIN_RATE)
- * Example: $1.00 raw cost with 50% margin = $1.00 / 0.5 = $2.00 charged
+ * Calculate USD to charge with markup.
+ * Formula: usdCharged = usdCostRaw * (1 + markupRate)
+ * Example: $1.00 raw cost with 25% markup → $1.00 * 1.25 = $1.25 charged
+ *
+ * @param usdCostRaw  Raw provider cost in USD
+ * @param markupRate  Per-plan markup (e.g. 0.25 for 25%). Falls back to global USAGE_MARGIN_RATE.
  */
-export function calculateUsdWithMargin(usdCostRaw: number): {
+export function calculateUsdWithMargin(
+  usdCostRaw: number,
+  markupRate?: number,
+): {
   usdCharged: number;
   marginRate: number;
 } {
-  const grossUpDivisor = Math.max(0.000001, 1 - USAGE_MARGIN_RATE); // Guard against divide-by-zero
-  const usdCharged = usdCostRaw / grossUpDivisor;
+  const rate = markupRate ?? USAGE_MARGIN_RATE;
+  const usdCharged = usdCostRaw * (1 + rate);
 
   return {
     usdCharged,
-    marginRate: USAGE_MARGIN_RATE,
+    marginRate: rate,
   };
 }
 
@@ -211,8 +217,11 @@ export async function processUsage(args: {
 }): Promise<UsageProcessingResult> {
   const { orgBillingId, userId, serviceType, provider, resource, model, usdCostRaw, requestId, metadata = {} } = args;
 
-  // Calculate USD with margin
-  const { usdCharged, marginRate } = calculateUsdWithMargin(usdCostRaw);
+  // Look up the org's plan-specific markup rate (falls back to global default)
+  const planMarkup = await dbService.getUsageMarkupForOrg(orgBillingId);
+
+  // Calculate USD with plan markup: charged = raw * (1 + rate)
+  const { usdCharged, marginRate } = calculateUsdWithMargin(usdCostRaw, planMarkup);
 
   // Convert to cents for balance deduction
   const amountCents = Math.ceil(usdCharged * 100);
@@ -303,10 +312,10 @@ export class UsageProcessingTransformStream extends TransformStream<Uint8Array, 
             return;
           }
 
-          // Calculate cost
+          // Calculate raw provider cost
           const usdCostRaw = args.calculateCost(usage);
 
-          // Process usage
+          // Process usage (looks up per-plan markup internally)
           const result = await processUsage({
             orgBillingId: args.orgBillingId,
             userId: args.userId,

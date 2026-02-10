@@ -1,13 +1,17 @@
 /**
  * Subscriptions Routes
  * Manage user subscriptions
+ *
+ * Plans (2026-02-09):
+ *   MONTHLY — $25/seat/month, 25% usage markup
+ *   YEARLY  — $20/seat/month ($240/year), 20% usage markup
  */
 
 import { Hono } from 'hono';
 import { nanoid } from 'nanoid';
 import { z } from 'zod';
 import { authMiddleware, requireAuthUser } from '../../middleware/auth';
-import { dbService } from '../../services/db.service';
+import { dbService, SubscriptionPlan } from '../../services/db.service';
 import { getDefaultProvider } from '../../services/payments';
 
 const app = new Hono();
@@ -23,6 +27,23 @@ const createSubscriptionSchema = z.object({
 const updateSeatsSchema = z.object({
   seats: z.number().int().min(1),
 });
+
+/** Serialize plan fields for API responses */
+function serializePlanForResponse(plan: SubscriptionPlan) {
+  return {
+    id: plan.id,
+    name: plan.name,
+    basePricePerSeat: plan.base_price_per_seat,
+    usageMarkup: plan.usage_markup,
+    billingInterval: plan.billing_interval,
+    features: plan.features ? JSON.parse(plan.features) : null,
+    includedStorageGb: plan.included_storage_gb,
+    includedBandwidthGb: plan.included_bandwidth_gb,
+    includedInvocations: plan.included_invocations,
+    includedComputeSeconds: plan.included_compute_seconds,
+    trialDays: plan.trial_days,
+  };
+}
 
 /**
  * GET /billing/subscriptions
@@ -46,6 +67,7 @@ app.get('/', async (c) => {
         return {
           id: sub.id,
           plan: plan?.name || 'UNKNOWN',
+          billingInterval: plan?.billing_interval || 'MONTHLY',
           status: sub.status,
           seats: sub.seats,
           basePricePerSeat: plan?.base_price_per_seat || 0,
@@ -90,6 +112,7 @@ app.get('/active', async (c) => {
       subscription: {
         id: subscription.id,
         plan: plan?.name || 'UNKNOWN',
+        billingInterval: plan?.billing_interval || 'MONTHLY',
         status: subscription.status,
         seats: subscription.seats,
         basePricePerSeat: plan?.base_price_per_seat || 0,
@@ -134,13 +157,24 @@ app.post('/', async (c) => {
       return c.json({ error: 'Plan not found' }, 404);
     }
 
-    // Create subscription in provider (if not FREE plan)
+    // Guard: only allow subscribing to active plans
+    if (!plan.is_active) {
+      return c.json({ error: 'This plan is no longer available' }, 400);
+    }
+
+    // Calculate period end based on billing interval
     let stripeSubscriptionId: string | undefined;
     const now = Date.now();
     const periodEnd = new Date(now);
-    periodEnd.setMonth(periodEnd.getMonth() + 1);
 
-    if (plan.name !== 'FREE' && plan.stripe_price_id && customer.stripe_customer_id) {
+    if (plan.billing_interval === 'YEARLY') {
+      periodEnd.setFullYear(periodEnd.getFullYear() + 1);
+    } else {
+      periodEnd.setMonth(periodEnd.getMonth() + 1);
+    }
+
+    // Create subscription in Stripe (if plan has a Stripe price)
+    if (plan.stripe_price_id && customer.stripe_customer_id) {
       const provider = getDefaultProvider();
       if (provider.createSubscription) {
         const externalSub = await provider.createSubscription({
@@ -169,6 +203,7 @@ app.post('/', async (c) => {
       subscription: {
         id: subscription.id,
         plan: plan.name,
+        billingInterval: plan.billing_interval,
         status: subscription.status,
         seats: subscription.seats,
         basePricePerSeat: plan.base_price_per_seat,
@@ -237,6 +272,7 @@ app.post('/:id/cancel', async (c) => {
       subscription: {
         id: updatedSubscription!.id,
         plan: plan?.name || 'UNKNOWN',
+        billingInterval: plan?.billing_interval || 'MONTHLY',
         status: updatedSubscription!.status,
         seats: updatedSubscription!.seats,
         cancelAt: updatedSubscription!.cancel_at,
@@ -290,6 +326,7 @@ app.put('/:id/seats', async (c) => {
       subscription: {
         id: updatedSubscription!.id,
         plan: plan?.name || 'UNKNOWN',
+        billingInterval: plan?.billing_interval || 'MONTHLY',
         status: updatedSubscription!.status,
         seats: updatedSubscription!.seats,
       },
@@ -307,25 +344,14 @@ app.put('/:id/seats', async (c) => {
 
 /**
  * GET /billing/subscriptions/plans
- * List available subscription plans
+ * List available (active) subscription plans
  */
 app.get('/plans', async (c) => {
   try {
-    const plans = await dbService.listSubscriptionPlans();
+    const plans = await dbService.listSubscriptionPlans(); // only returns active plans
 
     return c.json({
-      plans: plans.map((p) => ({
-        id: p.id,
-        name: p.name,
-        basePricePerSeat: p.base_price_per_seat,
-        usageMarkup: p.usage_markup,
-        features: p.features ? JSON.parse(p.features) : null,
-        includedStorageGb: p.included_storage_gb,
-        includedBandwidthGb: p.included_bandwidth_gb,
-        includedInvocations: p.included_invocations,
-        includedComputeSeconds: p.included_compute_seconds,
-        trialDays: p.trial_days,
-      })),
+      plans: plans.map(serializePlanForResponse),
     });
   } catch (error) {
     console.error('List plans error:', error);
@@ -367,6 +393,7 @@ app.get('/org/:orgId', async (c) => {
       subscription: {
         id: subscription.id,
         plan: plan?.name || 'UNKNOWN',
+        billingInterval: plan?.billing_interval || 'MONTHLY',
         status: subscription.status,
         seats: subscription.seats,
         basePricePerSeat: plan?.base_price_per_seat || 0,

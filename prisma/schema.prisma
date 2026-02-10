@@ -257,9 +257,11 @@ model PaymentMethod {
 
 model SubscriptionPlan {
   id               String   @id @default(uuid())
-  name             String   @unique // FREE, STARTER, PRO, ENTERPRISE
-  basePricePerSeat Int      @map("base_price_per_seat") // in cents
-  usageMarkup      Float    @default(0) @map("usage_markup") // percentage as decimal
+  name             String   @unique // MONTHLY, YEARLY
+  basePricePerSeat Int      @map("base_price_per_seat") // in cents (per-month equivalent)
+  usageMarkup      Float    @default(0) @map("usage_markup") // markup as decimal, e.g. 0.25 = 25%
+  billingInterval  String   @default("MONTHLY") @map("billing_interval") // MONTHLY | YEARLY
+  isActive         Boolean  @default(true) @map("is_active")
   features         String?  // JSON array
   stripePriceId    String?  @map("stripe_price_id")
 
