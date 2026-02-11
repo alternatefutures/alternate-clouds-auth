@@ -23,7 +23,7 @@ on:
 env:
   # The DSEQ and provider will be set after the full redeploy.
   # Update these after running the full deploy-akash.yml workflow.
-  AUTH_DSEQ: "25466207"
+  AUTH_DSEQ: "25474440"
   AUTH_PROVIDER: "akash1xmjzu9dczlg9fa4v3pfvwzn7ty89r003laj4ac"
 
 concurrency:
