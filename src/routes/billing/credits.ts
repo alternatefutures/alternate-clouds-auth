@@ -162,7 +162,6 @@ app.get('/org/:orgId/usage', async (c) => {
     return c.json({
       summary: {
         usdCharged: result.summary.usdCharged,
-        usdCostRaw: result.summary.usdCostRaw,
       },
       items: result.items.map((item) => ({
         id: item.id,
@@ -170,9 +169,7 @@ app.get('/org/:orgId/usage', async (c) => {
         provider: item.provider,
         resource: item.resource,
         model: item.model,
-        usdCostRaw: item.usd_cost_raw,
         usdCharged: item.usd_charged,
-        marginRate: item.margin_rate,
         createdAt: item.created_at,
       })),
     });

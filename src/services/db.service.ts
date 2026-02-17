@@ -1556,6 +1556,24 @@ export class DatabaseService {
       timeout: 30000, // 30s (default is 5s, too tight for cross-datacenter Akash deploys)
     });
 
+    // 6. Seed $5.00 signup compute credit into the org's usage wallet
+    try {
+      await this.creditOrgBalanceIdempotent({
+        orgBillingId: billingId,
+        actorUserId: userId,
+        amountCents: 500, // $5.00
+        reason: 'signup_credit',
+        idempotencyKey: `signup_credit:${billingId}`,
+        metadata: {
+          description: 'Signup compute credit',
+          orgId,
+        },
+      });
+    } catch (error) {
+      // Non-fatal: org creation succeeds even if credit seeding fails
+      console.warn(`[createDefaultOrganizationForUser] Failed to seed signup credit for org ${orgId}:`, error);
+    }
+
     return {
       id: org.id,
       slug: org.slug,
@@ -3272,7 +3290,7 @@ export class DatabaseService {
    */
   async logOrgUsage(args: {
     orgBillingId: string;
-    userId: string;
+    userId?: string | null; // null for system-initiated debits (billing scheduler)
     serviceType: string; // ai_inference, compute, storage, bandwidth, etc.
     provider: string;
     resource: string;
@@ -3302,11 +3320,14 @@ export class DatabaseService {
 
     // Create both records in a transaction
     const result = await this.prisma.$transaction(async (tx) => {
+      // Resolve userId: null/undefined/'system' → null (for system-initiated debits)
+      const resolvedUserId = (userId && userId !== 'system') ? userId : null;
+
       // User-visible usage log
       const usage = await tx.organizationUsageLog.create({
         data: {
           orgBillingId,
-          userId,
+          userId: resolvedUserId,
           serviceType,
           provider,
           resource,
@@ -3323,7 +3344,7 @@ export class DatabaseService {
       const costsPrivate = await tx.organizationUsageCostsPrivate.create({
         data: {
           orgBillingId,
-          userId,
+          userId: resolvedUserId,
           serviceType,
           provider,
           resource,

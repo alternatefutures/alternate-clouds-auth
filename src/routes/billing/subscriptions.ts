@@ -28,13 +28,12 @@ const updateSeatsSchema = z.object({
   seats: z.number().int().min(1),
 });
 
-/** Serialize plan fields for API responses */
+/** Serialize plan fields for API responses (never expose internal markup) */
 function serializePlanForResponse(plan: SubscriptionPlan) {
   return {
     id: plan.id,
     name: plan.name,
     basePricePerSeat: plan.base_price_per_seat,
-    usageMarkup: plan.usage_markup,
     billingInterval: plan.billing_interval,
     features: plan.features ? JSON.parse(plan.features) : null,
     includedStorageGb: plan.included_storage_gb,
@@ -71,7 +70,6 @@ app.get('/', async (c) => {
           status: sub.status,
           seats: sub.seats,
           basePricePerSeat: plan?.base_price_per_seat || 0,
-          usageMarkup: plan?.usage_markup || 0,
           currentPeriodStart: sub.current_period_start,
           currentPeriodEnd: sub.current_period_end,
           cancelAt: sub.cancel_at,
@@ -116,7 +114,6 @@ app.get('/active', async (c) => {
         status: subscription.status,
         seats: subscription.seats,
         basePricePerSeat: plan?.base_price_per_seat || 0,
-        usageMarkup: plan?.usage_markup || 0,
         currentPeriodStart: subscription.current_period_start,
         currentPeriodEnd: subscription.current_period_end,
         cancelAt: subscription.cancel_at,
@@ -207,7 +204,6 @@ app.post('/', async (c) => {
         status: subscription.status,
         seats: subscription.seats,
         basePricePerSeat: plan.base_price_per_seat,
-        usageMarkup: plan.usage_markup,
         currentPeriodStart: subscription.current_period_start,
         currentPeriodEnd: subscription.current_period_end,
         createdAt: subscription.created_at,
@@ -397,7 +393,6 @@ app.get('/org/:orgId', async (c) => {
         status: subscription.status,
         seats: subscription.seats,
         basePricePerSeat: plan?.base_price_per_seat || 0,
-        usageMarkup: plan?.usage_markup || 0,
         includedStorageGb: plan?.included_storage_gb || 0,
         includedBandwidthGb: plan?.included_bandwidth_gb || 0,
         includedInvocations: plan?.included_invocations || 0,

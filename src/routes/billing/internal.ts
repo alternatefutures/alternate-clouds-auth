@@ -1,0 +1,481 @@
+/**
+ * Internal Billing API
+ * Service-to-service endpoints for compute billing (called by service-cloud-api)
+ *
+ * All endpoints are protected by x-af-introspection-secret header
+ * (same pattern as /tokens/validate).
+ *
+ * These endpoints enable:
+ *   - Akash escrow deposits and refunds (wallet debit/credit)
+ *   - Phala per-hour compute debits
+ *   - Balance and markup queries (for threshold checks)
+ *   - Low-balance notification emails
+ */
+
+import { Hono } from 'hono';
+import { z } from 'zod';
+import { dbService } from '../../services/db.service';
+import { EmailService } from '../../services/email.service';
+
+const app = new Hono();
+
+// ============================================
+// INTROSPECTION SECRET GUARD
+// ============================================
+
+/**
+ * Middleware: require x-af-introspection-secret header
+ * This is the same pattern used by /tokens/validate
+ */
+app.use('*', async (c, next) => {
+  const secret = process.env.AUTH_INTROSPECTION_SECRET;
+
+  // In development, skip auth if no secret is configured
+  if (!secret && process.env.NODE_ENV === 'development') {
+    return next();
+  }
+
+  if (!secret) {
+    console.error('[Internal Billing] AUTH_INTROSPECTION_SECRET not configured');
+    return c.json({ error: 'Internal API not configured' }, 503);
+  }
+
+  const provided = c.req.header('x-af-introspection-secret');
+  if (!provided || provided !== secret) {
+    return c.json({ error: 'Unauthorized' }, 401);
+  }
+
+  return next();
+});
+
+// ============================================
+// VALIDATION SCHEMAS
+// ============================================
+
+const escrowDepositSchema = z.object({
+  orgBillingId: z.string().min(1),
+  organizationId: z.string().min(1),
+  userId: z.string().min(1),
+  amountCents: z.number().int().positive(),
+  deploymentId: z.string().min(1), // AkashDeployment.id (for idempotency)
+  description: z.string().optional(),
+  metadata: z.record(z.unknown()).optional(),
+});
+
+const escrowRefundSchema = z.object({
+  orgBillingId: z.string().min(1),
+  userId: z.string().optional(),
+  amountCents: z.number().int().positive(),
+  deploymentId: z.string().min(1),
+  description: z.string().optional(),
+  metadata: z.record(z.unknown()).optional(),
+});
+
+const computeDebitSchema = z.object({
+  orgBillingId: z.string().min(1),
+  userId: z.string().optional(),
+  amountCents: z.number().int().positive(),
+  serviceType: z.string().min(1), // 'akash_compute', 'phala_tee', 'storage', etc.
+  provider: z.string().min(1), // 'akash', 'phala', 'ipfs', etc.
+  resource: z.string().min(1), // deployment ID or resource identifier
+  description: z.string().optional(),
+  idempotencyKey: z.string().min(1),
+  metadata: z.record(z.unknown()).optional(),
+});
+
+const notifySchema = z.object({
+  orgId: z.string().min(1),
+  type: z.enum(['low_balance_pause', 'low_balance_warning', 'escrow_depleted']),
+  email: z.string().email().optional().or(z.literal('')), // optional — auth service looks up org admin if empty
+  orgName: z.string().optional(),
+  balanceCents: z.number().int().optional(),
+  dailyCostCents: z.number().int().optional(),
+  pausedServices: z.array(z.string()).optional(),
+  metadata: z.record(z.unknown()).optional(),
+});
+
+// ============================================
+// ESCROW DEPOSIT — Debit wallet for Akash escrow
+// ============================================
+
+/**
+ * POST /internal/billing/escrow-deposit
+ *
+ * Debits the org's wallet to fund an Akash deployment escrow.
+ * Returns the new balance or an INSUFFICIENT_BALANCE error.
+ *
+ * Idempotency key: escrow_deposit:<orgBillingId>:<deploymentId>
+ */
+app.post('/escrow-deposit', async (c) => {
+  try {
+    const body = await c.req.json();
+    const data = escrowDepositSchema.parse(body);
+
+    const idempotencyKey = `escrow_deposit:${data.orgBillingId}:${data.deploymentId}`;
+
+    const result = await dbService.debitOrgBalanceAtomic({
+      orgBillingId: data.orgBillingId,
+      actorUserId: data.userId,
+      amountCents: data.amountCents,
+      reason: 'akash_escrow_deposit',
+      idempotencyKey,
+      metadata: {
+        deploymentId: data.deploymentId,
+        organizationId: data.organizationId,
+        description: data.description || 'Akash escrow deposit',
+        ...data.metadata,
+      },
+    });
+
+    return c.json({
+      success: true,
+      balanceCents: result.balanceCents,
+      alreadyProcessed: result.alreadyProcessed,
+    });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return c.json({ error: 'Invalid request', details: error.issues }, 400);
+    }
+    if (error instanceof Error && error.message === 'INSUFFICIENT_BALANCE') {
+      const balance = await dbService.getOrCreateOrgUsageBalance(
+        (await c.req.json()).orgBillingId
+      );
+      return c.json({
+        error: 'INSUFFICIENT_BALANCE',
+        balanceCents: balance.balance_cents,
+      }, 402);
+    }
+    console.error('[Internal Billing] Escrow deposit error:', error);
+    return c.json({ error: 'Internal error' }, 500);
+  }
+});
+
+// ============================================
+// ESCROW REFUND — Credit wallet for Akash escrow return
+// ============================================
+
+/**
+ * POST /internal/billing/escrow-refund
+ *
+ * Credits the org's wallet when an Akash deployment is closed
+ * and unused escrow is returned.
+ *
+ * Idempotency key: escrow_refund:<orgBillingId>:<deploymentId>
+ */
+app.post('/escrow-refund', async (c) => {
+  try {
+    const body = await c.req.json();
+    const data = escrowRefundSchema.parse(body);
+
+    const idempotencyKey = `escrow_refund:${data.orgBillingId}:${data.deploymentId}`;
+
+    const result = await dbService.creditOrgBalanceIdempotent({
+      orgBillingId: data.orgBillingId,
+      actorUserId: data.userId,
+      amountCents: data.amountCents,
+      reason: 'akash_escrow_refund',
+      idempotencyKey,
+      metadata: {
+        deploymentId: data.deploymentId,
+        description: data.description || 'Akash escrow refund — deployment closed',
+        ...data.metadata,
+      },
+    });
+
+    return c.json({
+      success: true,
+      balanceCents: result.balanceCents,
+      alreadyProcessed: result.alreadyProcessed,
+    });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return c.json({ error: 'Invalid request', details: error.issues }, 400);
+    }
+    console.error('[Internal Billing] Escrow refund error:', error);
+    return c.json({ error: 'Internal error' }, 500);
+  }
+});
+
+// ============================================
+// COMPUTE DEBIT — Debit wallet for daily compute charges
+// ============================================
+
+/**
+ * POST /internal/billing/compute-debit
+ *
+ * Debits the org's wallet for compute usage (Akash daily cost, Phala hourly billing, etc.)
+ * Used by the daily billing job in service-cloud-api.
+ *
+ * Also logs usage to OrganizationUsageLog + OrganizationUsageCostsPrivate.
+ */
+app.post('/compute-debit', async (c) => {
+  let parsedData: z.infer<typeof computeDebitSchema> | null = null;
+
+  try {
+    const body = await c.req.json();
+    parsedData = computeDebitSchema.parse(body);
+    const data = parsedData;
+
+    // Ensure balance row exists (creates with $0 if new)
+    await dbService.getOrCreateOrgUsageBalance(data.orgBillingId);
+
+    // Look up per-plan markup rate
+    const marginRate = await dbService.getUsageMarkupForOrg(data.orgBillingId);
+
+    // Calculate raw cost (reverse-engineer from charged amount)
+    // chargedCents = rawCents * (1 + marginRate), so rawCents = chargedCents / (1 + marginRate)
+    const rawCostCents = Math.round(data.amountCents / (1 + marginRate));
+    const rawCostUsd = rawCostCents / 100;
+    const chargedUsd = data.amountCents / 100;
+
+    // Debit balance
+    const debitResult = await dbService.debitOrgBalanceAtomic({
+      orgBillingId: data.orgBillingId,
+      actorUserId: data.userId,
+      amountCents: data.amountCents,
+      reason: data.serviceType,
+      idempotencyKey: data.idempotencyKey,
+      metadata: {
+        serviceType: data.serviceType,
+        provider: data.provider,
+        resource: data.resource,
+        description: data.description,
+        ...data.metadata,
+      },
+    });
+
+    // Log usage (user-visible + internal audit)
+    if (!debitResult.alreadyProcessed) {
+      await dbService.logOrgUsage({
+        orgBillingId: data.orgBillingId,
+        userId: data.userId || 'system',
+        serviceType: data.serviceType,
+        provider: data.provider,
+        resource: data.resource,
+        usdCostRaw: rawCostUsd,
+        marginRate,
+        usdCharged: chargedUsd,
+        metadata: data.metadata,
+      });
+    }
+
+    return c.json({
+      success: true,
+      balanceCents: debitResult.balanceCents,
+      alreadyProcessed: debitResult.alreadyProcessed,
+    });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return c.json({ error: 'Invalid request', details: error.issues }, 400);
+    }
+    if (error instanceof Error && error.message === 'INSUFFICIENT_BALANCE') {
+      if (parsedData) {
+        try {
+          const balance = await dbService.getOrCreateOrgUsageBalance(parsedData.orgBillingId);
+          return c.json({
+            error: 'INSUFFICIENT_BALANCE',
+            balanceCents: balance.balance_cents,
+          }, 402);
+        } catch {
+          // Fall through
+        }
+      }
+      return c.json({ error: 'INSUFFICIENT_BALANCE' }, 402);
+    }
+    const errMsg = error instanceof Error ? error.message : String(error);
+    const errStack = error instanceof Error ? error.stack : undefined;
+    console.error('[Internal Billing] Compute debit error:', errMsg);
+    if (errStack) console.error('[Internal Billing] Stack:', errStack);
+    if (parsedData) console.error('[Internal Billing] Request data:', JSON.stringify(parsedData));
+    return c.json({ error: 'Internal error', message: errMsg }, 500);
+  }
+});
+
+// ============================================
+// ORG BALANCE — Get wallet balance
+// ============================================
+
+/**
+ * GET /internal/billing/org-balance/:orgBillingId
+ *
+ * Returns the org's current wallet balance in cents.
+ * Used by the daily billing job for threshold checks.
+ */
+app.get('/org-balance/:orgBillingId', async (c) => {
+  try {
+    const { orgBillingId } = c.req.param();
+    const balance = await dbService.getOrCreateOrgUsageBalance(orgBillingId);
+
+    return c.json({
+      orgBillingId,
+      balanceCents: balance.balance_cents,
+      balanceUsd: (balance.balance_cents / 100).toFixed(2),
+    });
+  } catch (error) {
+    console.error('[Internal Billing] Get balance error:', error);
+    return c.json({ error: 'Internal error' }, 500);
+  }
+});
+
+// ============================================
+// ORG MARKUP — Get plan-specific margin rate
+// ============================================
+
+/**
+ * GET /internal/billing/org-markup/:orgBillingId
+ *
+ * Returns the org's plan-specific usage markup rate.
+ * Used by cloud-api to calculate costs with correct margin.
+ */
+app.get('/org-markup/:orgBillingId', async (c) => {
+  try {
+    const { orgBillingId } = c.req.param();
+    const marginRate = await dbService.getUsageMarkupForOrg(orgBillingId);
+
+    return c.json({
+      orgBillingId,
+      marginRate,
+      marginPercent: Math.round(marginRate * 100),
+    });
+  } catch (error) {
+    console.error('[Internal Billing] Get markup error:', error);
+    return c.json({ error: 'Internal error' }, 500);
+  }
+});
+
+// ============================================
+// ORG BILLING LOOKUP — Resolve orgId to orgBillingId
+// ============================================
+
+/**
+ * GET /internal/billing/org-billing/:orgId
+ *
+ * Resolves an organizationId to its OrganizationBilling record.
+ * Used by cloud-api to get orgBillingId before making billing calls.
+ */
+app.get('/org-billing/:orgId', async (c) => {
+  try {
+    const { orgId } = c.req.param();
+    const orgBilling = await dbService.getOrganizationBillingByOrgId(orgId);
+
+    if (!orgBilling) {
+      return c.json({ error: 'Organization billing not found' }, 404);
+    }
+
+    return c.json({
+      orgBillingId: orgBilling.id,
+      organizationId: orgId,
+      stripeCustomerId: orgBilling.stripe_customer_id,
+      trialEndsAt: orgBilling.trial_ends_at,
+      trialConverted: orgBilling.trial_converted,
+    });
+  } catch (error) {
+    console.error('[Internal Billing] Org billing lookup error:', error);
+    return c.json({ error: 'Internal error' }, 500);
+  }
+});
+
+// ============================================
+// NOTIFY — Send low-balance or pause emails
+// ============================================
+
+/**
+ * POST /internal/billing/notify
+ *
+ * Sends billing notification emails (low balance, deployment pause, etc.)
+ * Uses the existing Resend-based email service.
+ */
+app.post('/notify', async (c) => {
+  try {
+    const body = await c.req.json();
+    const data = notifySchema.parse(body);
+
+    const emailService = new EmailService();
+
+    const balanceStr = data.balanceCents != null
+      ? `$${(data.balanceCents / 100).toFixed(2)}`
+      : 'unknown';
+    const dailyCostStr = data.dailyCostCents != null
+      ? `$${(data.dailyCostCents / 100).toFixed(2)}`
+      : 'unknown';
+
+    let subject: string;
+    let htmlBody: string;
+
+    switch (data.type) {
+      case 'low_balance_pause':
+        subject = `[Alternate Futures] Deployments paused — insufficient balance`;
+        htmlBody = `
+          <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto;">
+            <h2 style="color: #ef4444;">Deployments Paused</h2>
+            <p>Your compute balance (${balanceStr}) has dropped below the minimum required
+            for 1 day of active deployments (${dailyCostStr}/day).</p>
+            ${data.pausedServices?.length ? `
+              <p><strong>Paused services:</strong></p>
+              <ul>${data.pausedServices.map(s => `<li>${s}</li>`).join('')}</ul>
+            ` : ''}
+            <p>To resume your deployments, add funds to your compute wallet:</p>
+            <a href="https://app.alternatefutures.ai/org/${data.orgId}/billing"
+               style="display: inline-block; background: #3b82f6; color: white; padding: 12px 24px;
+                      border-radius: 6px; text-decoration: none; margin: 16px 0;">
+              Add Funds
+            </a>
+            <p style="color: #6b7280; font-size: 14px;">
+              Once your balance covers at least 1 day of compute costs, your deployments
+              will automatically resume.
+            </p>
+          </div>
+        `;
+        break;
+
+      case 'low_balance_warning':
+        subject = `[Alternate Futures] Low balance warning — ${balanceStr} remaining`;
+        htmlBody = `
+          <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto;">
+            <h2 style="color: #f59e0b;">Low Balance Warning</h2>
+            <p>Your compute balance is ${balanceStr}. At your current usage rate
+            (${dailyCostStr}/day), your deployments may be paused soon.</p>
+            <a href="https://app.alternatefutures.ai/org/${data.orgId}/billing"
+               style="display: inline-block; background: #3b82f6; color: white; padding: 12px 24px;
+                      border-radius: 6px; text-decoration: none; margin: 16px 0;">
+              Add Funds
+            </a>
+          </div>
+        `;
+        break;
+
+      case 'escrow_depleted':
+        subject = `[Alternate Futures] Escrow depleted — deployment at risk`;
+        htmlBody = `
+          <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto;">
+            <h2 style="color: #ef4444;">Escrow Depleted</h2>
+            <p>The escrow for one of your Akash deployments has been fully consumed.
+            If your wallet balance is insufficient to top up the escrow, the deployment
+            will be paused.</p>
+            <a href="https://app.alternatefutures.ai/org/${data.orgId}/billing"
+               style="display: inline-block; background: #3b82f6; color: white; padding: 12px 24px;
+                      border-radius: 6px; text-decoration: none; margin: 16px 0;">
+              Add Funds
+            </a>
+          </div>
+        `;
+        break;
+    }
+
+    await emailService.sendEmail({
+      to: data.email,
+      subject,
+      html: htmlBody,
+    });
+
+    return c.json({ success: true, type: data.type });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return c.json({ error: 'Invalid request', details: error.issues }, 400);
+    }
+    console.error('[Internal Billing] Notify error:', error);
+    return c.json({ error: 'Failed to send notification' }, 500);
+  }
+});
+
+export default app;

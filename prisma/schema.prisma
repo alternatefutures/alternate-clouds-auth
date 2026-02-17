@@ -567,7 +567,7 @@ model OrganizationUsageLedger {
 model OrganizationUsageLog {
   id           String   @id @default(uuid())
   orgBillingId String   @map("org_billing_id")
-  userId       String   @map("user_id")
+  userId       String?  @map("user_id") // nullable for system-initiated debits (billing scheduler)
 
   serviceType  String   @map("service_type") // ai_inference, compute, storage, bandwidth, etc.
   provider     String   @map("provider") // openai, anthropic, aws, gcp, internal, etc.
@@ -584,7 +584,7 @@ model OrganizationUsageLog {
   createdAt    DateTime @default(now()) @map("created_at")
 
   orgBilling OrganizationBilling @relation(fields: [orgBillingId], references: [id], onDelete: Cascade)
-  user       AuthUser            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user       AuthUser?           @relation(fields: [userId], references: [id], onDelete: SetNull)
 
   @@index([orgBillingId, createdAt])
   @@index([userId, createdAt])
@@ -596,7 +596,7 @@ model OrganizationUsageLog {
 model OrganizationUsageCostsPrivate {
   id            String   @id @default(uuid())
   orgBillingId  String   @map("org_billing_id")
-  userId        String   @map("user_id")
+  userId        String?  @map("user_id") // nullable for system-initiated debits
 
   serviceType   String   @map("service_type")
   provider      String   @map("provider")
@@ -612,7 +612,7 @@ model OrganizationUsageCostsPrivate {
   createdAt     DateTime @default(now()) @map("created_at")
 
   orgBilling OrganizationBilling @relation(fields: [orgBillingId], references: [id], onDelete: Cascade)
-  user       AuthUser            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user       AuthUser?           @relation(fields: [userId], references: [id], onDelete: SetNull)
 
   @@index([orgBillingId, createdAt])
   @@map("organization_usage_costs_private")

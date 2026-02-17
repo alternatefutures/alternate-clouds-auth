@@ -13,6 +13,7 @@ import paymentsRoutes from './payments';
 import webhooksRoutes from './webhooks';
 import connectRoutes from './connect';
 import creditsRoutes from './credits';
+import internalRoutes from './internal';
 
 const app = new Hono();
 
@@ -26,5 +27,8 @@ app.route('/payments', paymentsRoutes);
 app.route('/webhooks', webhooksRoutes);
 app.route('/connect', connectRoutes);
 app.route('/credits', creditsRoutes);
+
+// Internal service-to-service billing API (protected by introspection secret)
+app.route('/internal', internalRoutes);
 
 export default app;

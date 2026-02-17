@@ -3,7 +3,7 @@ import { PrismaClient } from '@prisma/client';
 const prisma = new PrismaClient();
 
 /**
- * Alternate Futures subscription plans (2026-02-09)
+ * Alternate Futures subscription plans (2026-02-14)
  *
  * Pricing model:
  *   - Monthly: $25/seat/month, 25% markup on usage
@@ -12,6 +12,8 @@ const prisma = new PrismaClient();
  * Usage (AI inference, compute, storage, bandwidth) is billed from the
  * prepaid credits wallet. The markup is applied on top of raw provider cost:
  *   charged = rawCost * (1 + usageMarkup)
+ *
+ * Trial: 30-day free trial + $5 signup compute credit
  */
 const subscriptionPlans = [
   {
@@ -20,11 +22,12 @@ const subscriptionPlans = [
     usageMarkup: 0.25, // 25% markup on usage
     billingInterval: 'MONTHLY',
     isActive: true,
-    trialDays: 7,
+    trialDays: 30,
     features: JSON.stringify([
       'Full platform access',
       'AI inference (usage-based)',
       'Akash deployments',
+      'Phala TEE deployments',
       'Custom domains',
       'Team collaboration',
       'Priority support',
@@ -36,11 +39,12 @@ const subscriptionPlans = [
     usageMarkup: 0.20, // 20% markup on usage
     billingInterval: 'YEARLY',
     isActive: true,
-    trialDays: 7,
+    trialDays: 30,
     features: JSON.stringify([
       'Full platform access',
       'AI inference (usage-based)',
       'Akash deployments',
+      'Phala TEE deployments',
       'Custom domains',
       'Team collaboration',
       'Priority support',
