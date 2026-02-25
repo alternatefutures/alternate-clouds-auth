@@ -550,7 +550,7 @@ export class DatabaseService {
     const result = await this.prisma.authUser.create({
       data: {
         id: user.id,
-        email: user.email,
+        email: user.email?.toLowerCase(),
         emailVerified: intToBool(user.email_verified),
         phone: user.phone,
         phoneVerified: intToBool(user.phone_verified),
@@ -593,7 +593,7 @@ export class DatabaseService {
   }
 
   async getUserByEmail(email: string): Promise<User | null> {
-    const result = await this.prisma.authUser.findUnique({ where: { email } });
+    const result = await this.prisma.authUser.findUnique({ where: { email: email.toLowerCase() } });
     if (!result) return null;
 
     return {

@@ -170,6 +170,11 @@ app.get('/callback/:provider', async (c) => {
     // Get user info from provider
     const oauthUserInfo = await oauthService.getUserInfo(provider, accessToken);
 
+    // Normalize email to lowercase for case-insensitive uniqueness
+    if (oauthUserInfo.email) {
+      oauthUserInfo.email = oauthUserInfo.email.toLowerCase();
+    }
+
     // Check if user exists with this OAuth provider
     const identifier = `${provider}:${oauthUserInfo.id}`;
     let authMethod = await dbService.getAuthMethodByIdentifier(identifier, 'oauth');
