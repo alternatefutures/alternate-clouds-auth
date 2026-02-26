@@ -18,6 +18,7 @@
     "db:seed": "tsx scripts/seed-plans.ts",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
     "lint": "eslint . --ext .ts",
     "format": "prettier --write .",
     "postinstall": "prisma generate"
@@ -58,6 +59,7 @@
     "prisma": "^6.1.0",
     "tsx": "^4.7.1",
     "typescript": "^5.4.3",
+    "@vitest/coverage-v8": "^4.0.8",
     "vitest": "^4.0.8",
     "wrangler": "^4.42.2"
   },

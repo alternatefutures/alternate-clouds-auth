@@ -1,5 +1,7 @@
 # Alternate Futures Authentication Service
 
+[![Tests](https://github.com/alternatefutures/service-auth/actions/workflows/test.yml/badge.svg)](https://github.com/alternatefutures/service-auth/actions/workflows/test.yml)
+
 Multi-method authentication system supporting email, SMS, Web3 wallets, and social OAuth providers.
 
 ## Features
