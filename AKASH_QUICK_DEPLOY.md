@@ -1,202 +1,70 @@
-# Quick Akash Deployment Guide
+# Quick Deploy Guide — service-auth on Akash
 
-## 🚀 Deploy Auth Service to Akash in 10 Minutes
+## Code Update (Most Common)
 
-### Prerequisites
-- ✅ Akash CLI installed (`akash version` shows v0.38.4)
-- Akash wallet with ~5 AKT tokens
-- Environment variables ready
-
-### Step 1: Set Akash Environment
+Push to `main` and it deploys automatically:
 
 ```bash
-export AKASH_KEY_NAME=my-wallet
-export AKASH_KEYRING_BACKEND=os
-export AKASH_NODE=https://rpc.akash.network:443
-export AKASH_CHAIN_ID=akashnet-2
-export AKASH_ACCOUNT_ADDRESS=$(akash keys show $AKASH_KEY_NAME -a)
+git push origin main
+# docker-build.yml builds image → update-manifest.yml sends to Akash
 ```
 
-### Step 2: Update deploy-akash.yaml with Your Secrets
+Or trigger manually: **Actions** → **Update Auth Manifest (No Redeploy)** → **Run workflow**
 
-Edit `deploy-akash.yaml` and replace:
-- `JWT_SECRET` and `JWT_REFRESH_SECRET` with generated secrets
-- All OAuth credentials (GOOGLE_, GITHUB_, TWITTER_, DISCORD_)
-- RESEND_API_KEY and HTTPSMS credentials
+## Full Redeploy (New DSEQ)
 
-**Generate JWT secrets:**
+Only needed when changing compute resources (CPU/RAM/storage) or starting fresh.
+
+### 1. Close the old deployment
+From [Akash Console](https://deploy.cloudmos.io/addresses/akash1degudmhf24auhfnqtn99mkja3xt7clt9um77tn), close the old DSEQ.
+
+### 2. Run the deploy workflow
+**Actions** → **Deploy to Akash** → Check "I understand this creates a new DSEQ" → **Run workflow**
+
+### 3. Update the manifest workflow
+From the deploy summary, get the new DSEQ and provider. Update `.github/workflows/update-manifest.yml`:
+
+```yaml
+env:
+  AUTH_DSEQ: "<new-dseq>"
+  AUTH_PROVIDER: "<new-provider>"
+```
+
+### 4. Commit and push
 ```bash
-openssl rand -base64 32  # Use for JWT_SECRET
-openssl rand -base64 32  # Use for JWT_REFRESH_SECRET
+git add .github/workflows/update-manifest.yml
+git commit -m "update: set AUTH_DSEQ to <new-dseq>"
+git push origin main
 ```
 
-### Step 3: Deploy to Akash
+### 5. Update docs
+Update `DEPLOYMENTS.md` (repo root) with the new DSEQ.
 
-```bash
-cd /Users/wonderwomancode/Projects/fleek/alternatefutures-auth
+## Required GitHub Secrets
 
-# Create deployment
-akash tx deployment create deploy-akash.yaml \
-  --from $AKASH_KEY_NAME \
-  --node $AKASH_NODE \
-  --chain-id $AKASH_CHAIN_ID \
-  --gas=auto \
-  --gas-adjustment=1.5 \
-  -y
+| Secret | Where to get it |
+|--------|-----------------|
+| `AKASH_MNEMONIC` | Wallet recovery phrase |
+| `GHCR_PAT` | GitHub → Settings → Developer settings → Personal access tokens |
+| `INFISICAL_CLIENT_ID` | Infisical → Machine Identities |
+| `INFISICAL_CLIENT_SECRET` | Infisical → Machine Identities |
+| `INFISICAL_PROJECT_ID` | Infisical → Project Settings |
+| `INFISICAL_GLOBAL_PROJECT_ID` | Infisical → Global Project Settings |
 
-# Note the DSEQ (deployment sequence) from output
-export DSEQ=<your-deployment-sequence>
-```
+## Current Deployment
 
-### Step 4: Wait for Bids (~30-60 seconds)
+Do not hardcode DSEQs/providers in this file (they drift).
 
-```bash
-# List available bids
-akash query market bid list \
-  --owner $AKASH_ACCOUNT_ADDRESS \
-  --node $AKASH_NODE \
-  --state open
-```
+See the repo-root deployment trackers for current values:
 
-### Step 5: Accept a Bid
+- `DEPLOYMENTS.md`
 
-```bash
-# Choose the provider with best price/reputation
-export PROVIDER=<provider-address-from-bids>
-
-# Create lease
-akash tx market lease create \
-  --dseq $DSEQ \
-  --gseq 1 \
-  --oseq 1 \
-  --provider $PROVIDER \
-  --from $AKASH_KEY_NAME \
-  --node $AKASH_NODE \
-  --chain-id $AKASH_CHAIN_ID \
-  --gas=auto \
-  --gas-adjustment=1.5 \
-  -y
-```
-
-### Step 6: Send Manifest
+## Verify Deployment
 
 ```bash
-# Send your deployment configuration to the provider
-akash provider send-manifest deploy-akash.yaml \
-  --dseq $DSEQ \
-  --provider $PROVIDER \
-  --from $AKASH_KEY_NAME \
-  --node $AKASH_NODE
+curl https://auth.alternatefutures.ai/health
 ```
-
-### Step 7: Get Your Service URL
-
-```bash
-# Check deployment status
-akash provider lease-status \
-  --dseq $DSEQ \
-  --gseq 1 \
-  --oseq 1 \
-  --provider $PROVIDER \
-  --from $AKASH_KEY_NAME \
-  --node $AKASH_NODE
-```
-
-Look for the `forwarded_ports` section to get your public URL.
-
-### Step 8: Test Your Deployment
-
-```bash
-# Health check (replace with your actual URL)
-curl http://<provider-url>:<port>/health
-
-# Should return:
-# {"status":"ok","service":"alternatefutures-auth","version":"0.1.0"}
-```
-
-### Step 9: Update OAuth Redirect URIs
-
-Once you have your production URL, update redirect URIs in:
-
-1. **Google Cloud Console** → `http://<your-akash-url>/auth/oauth/callback/google`
-2. **GitHub Settings** → `http://<your-akash-url>/auth/oauth/callback/github`
-3. **Twitter Developer** → `http://<your-akash-url>/auth/oauth/callback/twitter`
-4. **Discord Developer** → `http://<your-akash-url>/auth/oauth/callback/discord`
-
-### Step 10: Set Up Custom Domain (Optional)
-
-Point `auth.alternatefutures.ai` to your Akash URL:
-
-1. Get the provider hostname from lease-status
-2. Add CNAME record in your DNS:
-   ```
-   Type: CNAME
-   Host: auth
-   Value: <provider-hostname>
-   ```
-
-## Useful Commands
-
-### View Logs
-```bash
-akash provider lease-logs \
-  --dseq $DSEQ \
-  --gseq 1 \
-  --oseq 1 \
-  --provider $PROVIDER \
-  --from $AKASH_KEY_NAME \
-  --node $AKASH_NODE \
-  --follow
-```
-
-### Update Deployment
-```bash
-# Close current deployment
-akash tx deployment close \
-  --dseq $DSEQ \
-  --from $AKASH_KEY_NAME \
-  --node $AKASH_NODE \
-  --chain-id $AKASH_CHAIN_ID \
-  -y
-
-# Then repeat steps 3-7 with updated deploy-akash.yaml
-```
-
-### Check Costs
-```bash
-akash query market lease get \
-  --dseq $DSEQ \
-  --gseq 1 \
-  --oseq 1 \
-  --provider $PROVIDER \
-  --owner $AKASH_ACCOUNT_ADDRESS \
-  --node $AKASH_NODE
-```
-
-## Troubleshooting
-
-### Build Fails
-- Check logs with `lease-logs` command
-- Verify GitHub repo is public and accessible
-- Ensure all environment variables are set in deploy-akash.yaml
-
-### Service Not Responding
-- Check if container is running: `lease-status`
-- View logs for errors: `lease-logs`
-- Verify port 3000 is exposed correctly
-
-### Database Issues
-- SQLite database is ephemeral on Akash
-- For persistence, consider adding persistent storage volume
-- Or migrate to Turso (SQLite over HTTP)
-
-## Cost Estimate
-
-With current manifest (1 CPU, 1GB RAM, 3GB storage):
-- **~$5-8/month** depending on provider
-- **80% cheaper** than Railway/AWS
-- **100% decentralized**
 
 ---
 
-**Ready to deploy?** Run the commands above in order!
+*Last updated: 2026-02-06*

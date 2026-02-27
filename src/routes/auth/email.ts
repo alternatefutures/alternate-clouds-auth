@@ -6,6 +6,7 @@ import { dbService } from '../../services/db.service';
 import { jwtService } from '../../services/jwt.service';
 import { generateOTP } from '../../utils/otp';
 import { emailAuthRequestSchema, emailAuthVerifySchema } from '../../utils/validators';
+import { timingSafeCompare } from '../../utils/crypto';
 import { strictRateLimit } from '../../middleware/ratelimit';
 
 const app = new Hono();
@@ -83,8 +84,8 @@ app.post('/verify', strictRateLimit, async (c) => {
       return c.json({ error: 'Too many failed attempts. Please request a new code.' }, 400);
     }
 
-    // Verify code
-    if (verificationCode.code !== code) {
+    // Verify code (timing-safe comparison to prevent timing attacks)
+    if (!timingSafeCompare(verificationCode.code, code)) {
       // Increment attempt counter
       await dbService.incrementVerificationAttempts(verificationCode.id);
 
@@ -99,8 +100,11 @@ app.post('/verify', strictRateLimit, async (c) => {
 
     // Check if user exists
     let user = await dbService.getUserByEmail(email);
+    let isNewUser = false;
 
     if (!user) {
+      isNewUser = true;
+      
       // Create new user
       user = await dbService.createUser({
         id: nanoid(),
@@ -118,12 +122,60 @@ app.post('/verify', strictRateLimit, async (c) => {
         verified: 1,
         is_primary: 1,
       });
+
+      // Create default organization for new user
+      const orgSlug = `user-${user.id.slice(0, 8)}`;
+      const orgName = email.split('@')[0] || 'My Organization';
+      
+      try {
+        console.log(`[org-create] Creating default org for NEW user ${user.id}...`);
+        await dbService.createDefaultOrganizationForUser({
+          orgId: nanoid(),
+          memberId: nanoid(),
+          billingId: nanoid(),
+          billingCustomerId: nanoid(),
+          subscriptionId: nanoid(),
+          userId: user.id,
+          orgSlug,
+          orgName: `${orgName}'s Org`,
+        });
+        console.log(`[org-create] ✓ Default org created for user ${user.id}`);
+      } catch (orgError: any) {
+        console.error(`[org-create] ✖ Failed for new user ${user.id}:`, orgError?.message || orgError);
+        console.error(`[org-create]   Code: ${orgError?.code}, Meta: ${JSON.stringify(orgError?.meta)}`);
+      }
     } else {
       // Update email verification status
       await dbService.updateUser(user.id, {
         email_verified: 1,
         last_login_at: Date.now(),
       });
+
+      // Check if existing user has an organization, create one if not
+      const existingOrgs = await dbService.getOrganizationsByUserId(user.id);
+      
+      if (existingOrgs.length === 0) {
+        const orgSlug = `user-${user.id.slice(0, 8)}`;
+        const orgName = email.split('@')[0] || 'My Organization';
+        
+        try {
+          console.log(`[org-create] Creating default org for EXISTING user ${user.id} (0 orgs)...`);
+          await dbService.createDefaultOrganizationForUser({
+            orgId: nanoid(),
+            memberId: nanoid(),
+            billingId: nanoid(),
+            billingCustomerId: nanoid(),
+            subscriptionId: nanoid(),
+            userId: user.id,
+            orgSlug,
+            orgName: `${orgName}'s Org`,
+          });
+          console.log(`[org-create] ✓ Default org created for existing user ${user.id}`);
+        } catch (orgError: any) {
+          console.error(`[org-create] ✖ Failed for existing user ${user.id}:`, orgError?.message || orgError);
+          console.error(`[org-create]   Code: ${orgError?.code}, Meta: ${JSON.stringify(orgError?.meta)}`);
+        }
+      }
     }
 
     // Generate JWT tokens

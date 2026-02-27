@@ -26,11 +26,17 @@ model AuthUser {
   updatedAt     DateTime  @updatedAt @map("updated_at")
   lastLoginAt   DateTime? @map("last_login_at")
 
-  authMethods         AuthMethod[]
-  sessions            AuthSession[]
-  personalAccessTokens PersonalAccessToken[]
-  billingCustomer     BillingCustomer?
-  connectedAccounts   ConnectedAccount[]
+  authMethods           AuthMethod[]
+  sessions              AuthSession[]
+  personalAccessTokens  PersonalAccessToken[]
+  billingCustomer       BillingCustomer?
+  connectedAccounts     ConnectedAccount[]
+  organizationMembers   OrganizationMember[]
+
+  // Usage wallet relations
+  usageLedgerEntries    OrganizationUsageLedger[]
+  usageLogEntries       OrganizationUsageLog[]
+  usageCostsPrivate     OrganizationUsageCostsPrivate[]
 
   @@map("auth_users")
 }
@@ -108,20 +114,93 @@ model SIWEChallenge {
 }
 
 model PersonalAccessToken {
-  id         String    @id @default(uuid())
-  userId     String    @map("user_id")
-  name       String
-  token      String    @unique
-  expiresAt  DateTime? @map("expires_at")
-  lastUsedAt DateTime? @map("last_used_at")
-  createdAt  DateTime  @default(now()) @map("created_at")
-  updatedAt  DateTime  @updatedAt @map("updated_at")
+  id             String    @id @default(uuid())
+  userId         String    @map("user_id")
+  organizationId String?   @map("organization_id")
+  name           String
+  token          String    @unique
+  expiresAt      DateTime? @map("expires_at")
+  lastUsedAt     DateTime? @map("last_used_at")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
 
-  user AuthUser @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user         AuthUser      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  organization Organization? @relation(fields: [organizationId], references: [id], onDelete: Cascade)
 
   @@index([userId])
   @@index([token])
+  @@index([organizationId])
   @@map("auth_personal_access_tokens")
+}
+
+// ============================================
+// ORGANIZATION MODELS
+// ============================================
+
+enum OrgRole {
+  OWNER
+  ADMIN
+  MEMBER
+}
+
+model Organization {
+  id        String   @id @default(uuid())
+  slug      String   @unique
+  name      String
+  avatarUrl String?  @map("avatar_url")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  members              OrganizationMember[]
+  billing              OrganizationBilling?
+  personalAccessTokens PersonalAccessToken[]
+
+  @@map("organizations")
+}
+
+model OrganizationMember {
+  id             String   @id @default(uuid())
+  organizationId String   @map("organization_id")
+  userId         String   @map("user_id")
+  role           OrgRole  @default(MEMBER)
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user         AuthUser     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, userId])
+  @@index([organizationId])
+  @@index([userId])
+  @@map("organization_members")
+}
+
+model OrganizationBilling {
+  id               String   @id @default(uuid())
+  organizationId   String   @unique @map("organization_id")
+  stripeCustomerId String?  @unique @map("stripe_customer_id")
+
+  // Trial tracking
+  trialStartedAt   DateTime? @map("trial_started_at")
+  trialEndsAt      DateTime? @map("trial_ends_at")
+  trialConverted   Boolean   @default(false) @map("trial_converted")
+
+  createdAt        DateTime @default(now()) @map("created_at")
+  updatedAt        DateTime @updatedAt @map("updated_at")
+
+  organization    Organization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  subscriptions   Subscription[]
+  invoices        Invoice[]
+  usageRecords    UsageRecord[]
+  usageAggregates UsageAggregate[]
+
+  // Usage wallet relations
+  usageBalance      OrganizationUsageBalance?
+  usageLedger       OrganizationUsageLedger[]
+  usageLog          OrganizationUsageLog[]
+  usageCostsPrivate OrganizationUsageCostsPrivate[]
+
+  @@index([stripeCustomerId])
+  @@map("organization_billing")
 }
 
 // ============================================
@@ -178,11 +257,23 @@ model PaymentMethod {
 
 model SubscriptionPlan {
   id               String   @id @default(uuid())
-  name             String   @unique // FREE, STARTER, PRO, ENTERPRISE
-  basePricePerSeat Int      @map("base_price_per_seat") // in cents
-  usageMarkup      Float    @default(0) @map("usage_markup") // percentage as decimal
+  name             String   @unique // MONTHLY, YEARLY
+  basePricePerSeat Int      @map("base_price_per_seat") // in cents (per-month equivalent)
+  usageMarkup      Float    @default(0) @map("usage_markup") // markup as decimal, e.g. 0.25 = 25%
+  billingInterval  String   @default("MONTHLY") @map("billing_interval") // MONTHLY | YEARLY
+  isActive         Boolean  @default(true) @map("is_active")
   features         String?  // JSON array
   stripePriceId    String?  @map("stripe_price_id")
+
+  // Included usage per org/month
+  includedStorageGb      Int   @default(0) @map("included_storage_gb")
+  includedBandwidthGb    Int   @default(0) @map("included_bandwidth_gb")
+  includedInvocations    Int   @default(0) @map("included_invocations")
+  includedComputeSeconds Int   @default(0) @map("included_compute_seconds")
+
+  // Trial configuration
+  trialDays           Int      @default(0) @map("trial_days")
+
   createdAt        DateTime @default(now()) @map("created_at")
   updatedAt        DateTime @updatedAt @map("updated_at")
 
@@ -194,6 +285,7 @@ model SubscriptionPlan {
 model Subscription {
   id                   String    @id @default(uuid())
   customerId           String    @map("customer_id")
+  orgBillingId         String?   @map("org_billing_id")
   planId               String    @map("plan_id")
   status               String    // ACTIVE, CANCELED, PAST_DUE, UNPAID, TRIALING
   seats                Int       @default(1)
@@ -206,13 +298,15 @@ model Subscription {
   createdAt            DateTime  @default(now()) @map("created_at")
   updatedAt            DateTime  @updatedAt @map("updated_at")
 
-  customer BillingCustomer  @relation(fields: [customerId], references: [id], onDelete: Cascade)
-  plan     SubscriptionPlan @relation(fields: [planId], references: [id])
-  invoices Invoice[]
-  usageRecords UsageRecord[]
+  customer   BillingCustomer      @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  orgBilling OrganizationBilling? @relation(fields: [orgBillingId], references: [id], onDelete: Cascade)
+  plan       SubscriptionPlan     @relation(fields: [planId], references: [id])
+  invoices   Invoice[]
+  usageRecords    UsageRecord[]
   usageAggregates UsageAggregate[]
 
   @@index([customerId])
+  @@index([orgBillingId])
   @@index([status])
   @@map("auth_subscriptions")
 }
@@ -220,6 +314,7 @@ model Subscription {
 model Invoice {
   id               String    @id @default(uuid())
   customerId       String    @map("customer_id")
+  orgBillingId     String?   @map("org_billing_id")
   subscriptionId   String?   @map("subscription_id")
   invoiceNumber    String    @unique @map("invoice_number")
   status           String    // DRAFT, OPEN, PAID, VOID, UNCOLLECTIBLE
@@ -238,12 +333,14 @@ model Invoice {
   createdAt        DateTime  @default(now()) @map("created_at")
   updatedAt        DateTime  @updatedAt @map("updated_at")
 
-  customer     BillingCustomer   @relation(fields: [customerId], references: [id], onDelete: Cascade)
-  subscription Subscription?     @relation(fields: [subscriptionId], references: [id], onDelete: SetNull)
+  customer     BillingCustomer      @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  orgBilling   OrganizationBilling? @relation(fields: [orgBillingId], references: [id], onDelete: Cascade)
+  subscription Subscription?        @relation(fields: [subscriptionId], references: [id], onDelete: SetNull)
   lineItems    InvoiceLineItem[]
   payments     Payment[]
 
   @@index([customerId])
+  @@index([orgBillingId])
   @@index([status])
   @@map("auth_invoices")
 }
@@ -296,6 +393,7 @@ model Payment {
 model UsageRecord {
   id             String   @id @default(uuid())
   customerId     String   @map("customer_id")
+  orgBillingId   String?  @map("org_billing_id")
   subscriptionId String?  @map("subscription_id")
   metricType     String   @map("metric_type") // storage, bandwidth, compute, requests
   quantity       Float
@@ -306,10 +404,12 @@ model UsageRecord {
   recordedAt     DateTime @map("recorded_at")
   createdAt      DateTime @default(now()) @map("created_at")
 
-  customer     BillingCustomer @relation(fields: [customerId], references: [id], onDelete: Cascade)
-  subscription Subscription?   @relation(fields: [subscriptionId], references: [id], onDelete: SetNull)
+  customer     BillingCustomer      @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  orgBilling   OrganizationBilling? @relation(fields: [orgBillingId], references: [id], onDelete: Cascade)
+  subscription Subscription?        @relation(fields: [subscriptionId], references: [id], onDelete: SetNull)
 
   @@index([customerId, periodStart])
+  @@index([orgBillingId, periodStart])
   @@index([metricType])
   @@map("auth_usage_records")
 }
@@ -317,6 +417,7 @@ model UsageRecord {
 model UsageAggregate {
   id             String   @id @default(uuid())
   customerId     String   @map("customer_id")
+  orgBillingId   String?  @map("org_billing_id")
   subscriptionId String?  @map("subscription_id")
   metricType     String   @map("metric_type") // storage, bandwidth, compute, requests
   totalQuantity  Float    @default(0) @map("total_quantity")
@@ -325,10 +426,12 @@ model UsageAggregate {
   periodEnd      DateTime @map("period_end")
   updatedAt      DateTime @updatedAt @map("updated_at")
 
-  customer     BillingCustomer @relation(fields: [customerId], references: [id], onDelete: Cascade)
-  subscription Subscription?   @relation(fields: [subscriptionId], references: [id], onDelete: SetNull)
+  customer     BillingCustomer      @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  orgBilling   OrganizationBilling? @relation(fields: [orgBillingId], references: [id], onDelete: Cascade)
+  subscription Subscription?        @relation(fields: [subscriptionId], references: [id], onDelete: SetNull)
 
   @@unique([customerId, metricType, periodStart])
+  @@unique([orgBillingId, metricType, periodStart])
   @@map("auth_usage_aggregates")
 }
 
@@ -417,4 +520,100 @@ model PlatformFee {
   @@index([connectedAccountId])
   @@index([paymentId])
   @@map("auth_platform_fees")
+}
+
+// ============================================
+// USAGE WALLET MODELS (USD cents)
+// ============================================
+
+enum UsageLedgerDirection {
+  CREDIT
+  DEBIT
+}
+
+model OrganizationUsageBalance {
+  id           String   @id @default(uuid())
+  orgBillingId String   @unique @map("org_billing_id")
+  balanceCents Int      @default(0) @map("balance_cents") // USD cents (e.g., 2500 = $25.00)
+  updatedAt    DateTime @updatedAt @map("updated_at")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  orgBilling OrganizationBilling @relation(fields: [orgBillingId], references: [id], onDelete: Cascade)
+
+  @@index([orgBillingId])
+  @@map("organization_usage_balance")
+}
+
+model OrganizationUsageLedger {
+  id             String               @id @default(uuid())
+  orgBillingId   String               @map("org_billing_id")
+  actorUserId    String?              @map("actor_user_id") // who initiated (optional)
+  direction      UsageLedgerDirection
+  amountCents    Int                  @map("amount_cents") // USD cents (positive integer)
+  reason         String               @map("reason") // topup, ai_inference, compute, storage, bandwidth, etc.
+  idempotencyKey String               @unique @map("idempotency_key")
+  metadata       Json                 @default("{}") @map("metadata")
+  createdAt      DateTime             @default(now()) @map("created_at")
+
+  orgBilling OrganizationBilling @relation(fields: [orgBillingId], references: [id], onDelete: Cascade)
+  actorUser  AuthUser?           @relation(fields: [actorUserId], references: [id], onDelete: SetNull)
+
+  @@index([orgBillingId, createdAt])
+  @@index([actorUserId])
+  @@index([reason])
+  @@map("organization_usage_ledger")
+}
+
+model OrganizationUsageLog {
+  id           String   @id @default(uuid())
+  orgBillingId String   @map("org_billing_id")
+  userId       String?  @map("user_id") // nullable for system-initiated debits (billing scheduler)
+
+  serviceType  String   @map("service_type") // ai_inference, compute, storage, bandwidth, etc.
+  provider     String   @map("provider") // openai, anthropic, aws, gcp, internal, etc.
+  resource     String   @map("resource") // e.g. "chat/completions", "gpu-h100", "s3-storage"
+  model        String?  @map("model") // for AI: gpt-4o, claude-3, etc.
+
+  usdCostRaw   Float    @map("usd_cost_raw") // raw provider/compute cost in USD
+  marginRate   Float    @map("margin_rate") // applied margin (e.g., 0.5 = 50%)
+  usdCharged   Float    @map("usd_charged") // final amount charged = usdCostRaw / (1 - marginRate)
+
+  requestId    String?  @map("request_id") // stable request id if available
+  metadata     Json     @default("{}") @map("metadata")
+
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  orgBilling OrganizationBilling @relation(fields: [orgBillingId], references: [id], onDelete: Cascade)
+  user       AuthUser?           @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([orgBillingId, createdAt])
+  @@index([userId, createdAt])
+  @@index([serviceType])
+  @@index([provider])
+  @@map("organization_usage_log")
+}
+
+model OrganizationUsageCostsPrivate {
+  id            String   @id @default(uuid())
+  orgBillingId  String   @map("org_billing_id")
+  userId        String?  @map("user_id") // nullable for system-initiated debits
+
+  serviceType   String   @map("service_type")
+  provider      String   @map("provider")
+  resource      String   @map("resource")
+  model         String?  @map("model")
+
+  usdCostRaw    Float    @map("usd_cost_raw") // what we pay the provider
+  usdCharged    Float    @map("usd_charged") // what user pays (with margin)
+  marginRate    Float    @map("margin_rate")
+  marginUsd     Float    @map("margin_usd") // usdCharged - usdCostRaw (our profit)
+
+  metadata      Json     @default("{}") @map("metadata")
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  orgBilling OrganizationBilling @relation(fields: [orgBillingId], references: [id], onDelete: Cascade)
+  user       AuthUser?           @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([orgBillingId, createdAt])
+  @@map("organization_usage_costs_private")
 }

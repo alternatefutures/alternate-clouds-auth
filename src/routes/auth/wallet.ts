@@ -4,7 +4,7 @@ import { dbService } from '../../services/db.service';
 import { jwtService } from '../../services/jwt.service';
 import { siweService } from '../../services/siwe.service';
 import { generateNonce } from '../../utils/otp';
-import { walletChallengeRequestSchema, walletVerifySchema } from '../../utils/validators';
+import { walletChallengeRequestSchema, walletVerifySchema, validateSolanaAddress } from '../../utils/validators';
 import { strictRateLimit } from '../../middleware/ratelimit';
 
 const app = new Hono();
@@ -18,6 +18,14 @@ app.post('/challenge', strictRateLimit, async (c) => {
     // Validate request body
     const body = await c.req.json();
     const { address, chainId } = walletChallengeRequestSchema.parse(body);
+
+    // Solana wallets are accepted by the validator but not yet supported
+    if (validateSolanaAddress(address)) {
+      return c.json({
+        error: 'Solana wallet authentication is not yet supported. Please use an Ethereum wallet (MetaMask, WalletConnect, etc.).',
+        code: 'SOLANA_NOT_SUPPORTED',
+      }, 501);
+    }
 
     // Generate nonce
     const nonce = generateNonce();
@@ -78,6 +86,14 @@ app.post('/verify', strictRateLimit, async (c) => {
     const body = await c.req.json();
     const { address, signature, message } = walletVerifySchema.parse(body);
 
+    // Solana wallets are accepted by the validator but not yet supported
+    if (validateSolanaAddress(address)) {
+      return c.json({
+        error: 'Solana wallet authentication is not yet supported. Please use an Ethereum wallet.',
+        code: 'SOLANA_NOT_SUPPORTED',
+      }, 501);
+    }
+
     // Parse nonce from message
     const nonceMatch = message.match(/Nonce: (.+)/);
     if (!nonceMatch) {
@@ -129,6 +145,23 @@ app.post('/verify', strictRateLimit, async (c) => {
 
       // Update auth method last used
       await dbService.updateAuthMethodLastUsed(authMethod.id);
+
+      // Check if existing user has an organization, create one if not
+      const existingOrgs = await dbService.getOrganizationsByUserId(user.id);
+      if (existingOrgs.length === 0) {
+        const orgSlug = `user-${user.id.slice(0, 8)}`;
+        const shortAddress = address.slice(0, 6) + '...' + address.slice(-4);
+        await dbService.createDefaultOrganizationForUser({
+          orgId: nanoid(),
+          memberId: nanoid(),
+          billingId: nanoid(),
+          billingCustomerId: nanoid(),
+          subscriptionId: nanoid(),
+          userId: user.id,
+          orgSlug,
+          orgName: `${shortAddress}'s Org`,
+        });
+      }
     } else {
       // Create new user
       user = await dbService.createUser({
@@ -145,6 +178,20 @@ app.post('/verify', strictRateLimit, async (c) => {
         identifier: address.toLowerCase(),
         verified: 1,
         is_primary: 1,
+      });
+
+      // Create default organization for new user
+      const orgSlug = `user-${user.id.slice(0, 8)}`;
+      const shortAddress = address.slice(0, 6) + '...' + address.slice(-4);
+      await dbService.createDefaultOrganizationForUser({
+        orgId: nanoid(),
+        memberId: nanoid(),
+        billingId: nanoid(),
+        billingCustomerId: nanoid(),
+        subscriptionId: nanoid(),
+        userId: user.id,
+        orgSlug,
+        orgName: `${shortAddress}'s Org`,
       });
     }
 

@@ -98,9 +98,12 @@ export class OAuthService {
   }
 
   /**
-   * Generate authorization URL
+   * Generate authorization URL with PKCE support
+   * @param providerName - The OAuth provider name
+   * @param state - CSRF state token
+   * @param codeChallenge - PKCE code challenge (S256)
    */
-  getAuthorizationUrl(providerName: string, state: string): string | null {
+  getAuthorizationUrl(providerName: string, state: string, codeChallenge?: string): string | null {
     const provider = this.getProvider(providerName);
     if (!provider) return null;
 
@@ -112,13 +115,22 @@ export class OAuthService {
       state,
     });
 
+    // Add PKCE parameters if code challenge is provided
+    if (codeChallenge) {
+      params.set('code_challenge', codeChallenge);
+      params.set('code_challenge_method', 'S256');
+    }
+
     return `${provider.authUrl}?${params.toString()}`;
   }
 
   /**
-   * Exchange authorization code for access token
+   * Exchange authorization code for access token with PKCE support
+   * @param providerName - The OAuth provider name
+   * @param code - Authorization code from callback
+   * @param codeVerifier - PKCE code verifier (if PKCE was used)
    */
-  async exchangeCodeForToken(providerName: string, code: string): Promise<string> {
+  async exchangeCodeForToken(providerName: string, code: string, codeVerifier?: string): Promise<string> {
     const provider = this.getProvider(providerName);
     if (!provider) {
       throw new Error(`Provider ${providerName} not configured`);
@@ -131,6 +143,11 @@ export class OAuthService {
       redirect_uri: provider.redirectUri,
       grant_type: 'authorization_code',
     });
+
+    // Add PKCE code verifier if provided
+    if (codeVerifier) {
+      params.set('code_verifier', codeVerifier);
+    }
 
     const response = await fetch(provider.tokenUrl, {
       method: 'POST',

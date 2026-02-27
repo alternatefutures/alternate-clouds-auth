@@ -4,10 +4,13 @@ import { logger } from 'hono/logger';
 import { corsMiddleware, devCorsMiddleware } from './middleware/cors';
 import { secretsService } from './services/secrets.service';
 import { initializePaymentProviders } from './services/payments';
+import { dbService } from './services/db.service';
 import authRoutes from './routes/auth';
 import accountRoutes from './routes/account';
 import tokensRoutes from './routes/tokens';
 import billingRoutes from './routes/billing';
+import organizationsRoutes from './routes/organizations';
+import aiRoutes from './routes/ai';
 
 // Initialize secrets before anything else
 await secretsService.initialize();
@@ -47,6 +50,17 @@ app.get('/health', (c) => {
     version: '0.1.0',
     timestamp: new Date().toISOString(),
   });
+});
+
+// Database health check — verifies DB connectivity, schema integrity, and seed data
+app.get('/health/db', async (c) => {
+  const result = await dbService.healthCheck();
+  const httpStatus = result.status === 'error' ? 503 : 200;
+  return c.json({
+    ...result,
+    service: 'alternatefutures-auth',
+    timestamp: new Date().toISOString(),
+  }, httpStatus);
 });
 
 // Root endpoint
@@ -158,6 +172,12 @@ app.route('/tokens', tokensRoutes);
 // Mount billing routes
 app.route('/billing', billingRoutes);
 
+// Mount organizations routes
+app.route('/organizations', organizationsRoutes);
+
+// Mount AI inference proxy routes
+app.route('/ai', aiRoutes);
+
 // 404 handler
 app.notFound((c) => {
   return c.json({ error: 'Not Found' }, 404);
@@ -166,16 +186,18 @@ app.notFound((c) => {
 // Error handler
 app.onError((err, c) => {
   console.error('Error:', err);
+  const isDev = process.env.NODE_ENV === 'development';
   return c.json(
     {
       error: 'Internal Server Error',
-      message: err.message,
+      // Only expose error details in development to prevent information leakage
+      ...(isDev ? { message: err.message } : {}),
     },
     500
   );
 });
 
-const port = parseInt(process.env.PORT || '3000');
+const port = parseInt(process.env.PORT || '1601');
 
 console.log(`🚀 Alternate Futures Auth Service starting on port ${port}`);
 

@@ -1,258 +1,156 @@
-# Deploy Auth Backend to Akash Network
+# Deploy Auth Service to Akash Network
 
-Complete guide to deploying the auth backend on Akash (decentralized cloud compute).
+## Overview
 
-## Prerequisites
+The auth service runs on Akash Network with automated CI/CD via GitHub Actions. There are two deployment workflows:
 
-1. **Akash CLI installed**:
-   ```bash
-   brew install akash
-   # or
-   curl -sSfL https://raw.githubusercontent.com/akash-network/node/master/install.sh | sh
-   ```
+| Workflow | When to use | What happens |
+|----------|-------------|--------------|
+| `deploy-akash.yml` | Resource changes (CPU/RAM/storage), fresh start | Creates a **new** deployment with a new DSEQ. Requires updating `update-manifest.yml` with the new DSEQ/provider. |
+| `update-manifest.yml` | Code changes (new image) | Updates the **existing** deployment in-place. Runs automatically after Docker image build, or manually. No DNS changes needed. |
 
-2. **Akash wallet with AKT tokens**:
-   - Create wallet: `akash keys add my-wallet`
-   - Fund with AKT (minimum ~5 AKT for deployment)
-   - Get tokens from exchanges or faucet
+## Current deployment state (source of truth)
 
-3. **Docker installed** (for building image):
-   ```bash
-   brew install docker
-   ```
+This guide explains **how** to deploy/update `service-auth`.
 
-## Step 1: Build Docker Image
+For the **current** production DSEQ/provider/IP/endpoints, see:
 
-```bash
-cd ~/Projects/fleek/alternatefutures-auth
+- `DEPLOYMENTS.md` (repo root)
 
-# Build image
-docker build -t alternatefutures-auth:latest .
+## How CI/CD Works
 
-# Test locally
-docker run -p 3001:3001 \
-  -e JWT_SECRET=test-secret \
-  -e JWT_REFRESH_SECRET=test-refresh \
-  alternatefutures-auth:latest
-
-# Test endpoint
-curl http://localhost:3001/health
+```
+Push to main
+    │
+    ▼
+docker-build.yml  (builds + pushes image to GHCR)
+    │
+    ▼
+update-manifest.yml  (auto-triggered on build success)
+    │
+    ├── 1. Install akash CLI + provider-services (latest versions)
+    ├── 2. Setup wallet from AKASH_MNEMONIC secret
+    ├── 3. Generate + publish fresh certificate
+    ├── 4. Generate SDL with new image tag (main-<sha>)
+    ├── 5. akash tx deployment update (sync on-chain version hash)
+    └── 6. provider-services send-manifest (deliver to provider)
 ```
 
-## Step 2: Push to Public Registry
+The container restarts with the new image. Same DSEQ, same ingress URL, no DNS changes.
 
-Akash needs to pull images from a public registry:
+## Automated Updates (update-manifest.yml)
 
-```bash
-# Tag for Docker Hub
-docker tag alternatefutures-auth:latest your-dockerhub-username/alternatefutures-auth:latest
+This workflow runs automatically after every successful Docker image build on `main`. It can also be triggered manually from the Actions tab.
 
-# Login to Docker Hub
-docker login
+**Key details:**
+- DSEQ and provider are hardcoded in the workflow file (lines 26-27)
+- Uses `akash tx deployment update` to sync the on-chain version hash before sending the manifest
+- Generates a fresh Akash certificate each run (avoids stale cert issues)
+- Installs latest `akash` CLI and `provider-services` to ensure compatibility
 
-# Push
-docker push your-dockerhub-username/alternatefutures-auth:latest
-```
+### After a full redeploy, update these values:
 
-Or use GitHub Container Registry:
-
-```bash
-# Tag for GHCR
-docker tag alternatefutures-auth:latest ghcr.io/your-username/alternatefutures-auth:latest
-
-# Login to GHCR
-echo $GITHUB_TOKEN | docker login ghcr.io -u your-username --password-stdin
-
-# Push
-docker push ghcr.io/your-username/alternatefutures-auth:latest
-```
-
-## Step 3: Update Akash Deployment Manifest
-
-Edit `deploy-akash.yaml` and replace the image:
-
+In `.github/workflows/update-manifest.yml`:
 ```yaml
-services:
-  auth-api:
-    image: your-dockerhub-username/alternatefutures-auth:latest
-    # or
-    image: ghcr.io/your-username/alternatefutures-auth:latest
+env:
+  AUTH_DSEQ: "<see repo-root DEPLOYMENTS.md>"        # ← Update with new DSEQ
+  AUTH_PROVIDER: "<see repo-root DEPLOYMENTS.md>"    # ← Update with new provider
 ```
 
-## Step 4: Deploy to Akash
+## Full Redeploy (deploy-akash.yml)
 
+Use this when you need to change compute resources (CPU, RAM, storage) or start completely fresh. **This creates a new DSEQ.**
+
+### Steps:
+
+1. **Close the old deployment** from Akash Console to stop spending AKT
+2. **Trigger the workflow**: Actions tab → "Deploy to Akash" → Run workflow (check the confirmation box)
+3. **Wait ~3 minutes** for deployment to complete
+4. **Note the new DSEQ and provider** from the workflow summary
+5. **Update `update-manifest.yml`** with the new DSEQ and provider values
+6. **Commit and push** the updated workflow file
+7. **Update `DEPLOYMENTS.md`** at the repo root with the new info
+
+### Required GitHub Secrets:
+
+| Secret | Description |
+|--------|-------------|
+| `AKASH_MNEMONIC` | Wallet mnemonic for `akash1degudmhf24auhfnqtn99mkja3xt7clt9um77tn` |
+| `GHCR_PAT` | GitHub Container Registry personal access token |
+
+> **Note:** Database credentials, JWT secrets, Resend API key, and other runtime secrets are injected directly as SDL environment variables by `akash-mcp/scripts/redeploy-all.ts`. No external secrets manager is used.
+
+## Environment Variables
+
+All secrets are injected directly as SDL environment variables by `akash-mcp/scripts/redeploy-all.ts` at deploy time.
+
+### Set in SDL (non-sensitive):
+- `NODE_ENV=production`
+- `PORT=3000`
+- `DOMAIN=alternatefutures.ai`
+- `APP_URL=https://auth.alternatefutures.ai`
+- `FRONTEND_URL=https://app.alternatefutures.ai`
+- `CORS_ORIGIN=https://app.alternatefutures.ai`
+- OAuth redirect URIs
+
+### Injected by redeploy-all.ts (secrets):
+- `DATABASE_URL` (PostgreSQL connection string — dedicated `alternatefutures_auth` database)
+- `JWT_SECRET` / `JWT_REFRESH_SECRET`
+- `RESEND_API_KEY`
+- `STRIPE_SECRET_KEY`
+- `OPENAI_API_KEY`
+
+## SSL Architecture
+
+```
+User → auth.alternatefutures.ai
+     → Cloudflare (DNS proxy)
+     → (SSL proxy on Akash, Pingap; see repo-root deployment tracker for current IP)
+     → Akash provider ingress (service-auth container)
+```
+
+The SSL proxy handles TLS termination using a Cloudflare Origin Certificate. Akash providers cannot provision SSL for custom domains (they use DNS-01 challenges for their own wildcard certs only).
+
+## Monitoring
+
+### Health check:
 ```bash
-# Set your wallet
-export AKASH_KEY_NAME=my-wallet
-export AKASH_KEYRING_BACKEND=os
-export AKASH_NODE=https://rpc.akash.network:443
-export AKASH_CHAIN_ID=akashnet-2
-
-# Create deployment
-akash tx deployment create deploy-akash.yaml \
-  --from $AKASH_KEY_NAME \
-  --node $AKASH_NODE \
-  --chain-id $AKASH_CHAIN_ID \
-  --gas=auto \
-  --gas-adjustment=1.3
-
-# Wait for bids (30-60 seconds)
-# List bids
-akash query market bid list --owner $(akash keys show $AKASH_KEY_NAME -a) --node $AKASH_NODE
-
-# Accept a bid (choose lowest price or best provider)
-akash tx market lease create \
-  --owner $(akash keys show $AKASH_KEY_NAME -a) \
-  --dseq <deployment-sequence> \
-  --gseq 1 \
-  --oseq 1 \
-  --provider <provider-address> \
-  --from $AKASH_KEY_NAME \
-  --node $AKASH_NODE \
-  --chain-id $AKASH_CHAIN_ID
-
-# Send manifest to provider
-akash provider send-manifest deploy-akash.yaml \
-  --owner $(akash keys show $AKASH_KEY_NAME -a) \
-  --dseq <deployment-sequence> \
-  --provider <provider-address> \
-  --node $AKASH_NODE
-
-# Check status
-akash provider lease-status \
-  --owner $(akash keys show $AKASH_KEY_NAME -a) \
-  --dseq <deployment-sequence> \
-  --gseq 1 \
-  --oseq 1 \
-  --provider <provider-address> \
-  --node $AKASH_NODE
-
-# Get service URI
-akash provider lease-status \
-  --owner $(akash keys show $AKASH_KEY_NAME -a) \
-  --dseq <deployment-sequence> \
-  --gseq 1 \
-  --oseq 1 \
-  --provider <provider-address> \
-  --node $AKASH_NODE | grep "uri"
-```
-
-## Step 5: Configure DNS
-
-Once deployed, you'll get a URI like: `http://provider.akash.network:30080`
-
-### Option A: CNAME to Akash Provider (Centralized DNS)
-In Namecheap:
-```
-Type: CNAME
-Host: auth
-Value: provider-hostname.akash.network.
-```
-
-### Option B: Handshake Domain (Fully Decentralized)
-1. Register a Handshake domain (e.g., `alternatefutures/`)
-2. Set up HNS resolver
-3. Point to Akash provider IP
-
-### Option C: ENS + IPFS Link (Hybrid)
-1. Register ENS domain
-2. Set content hash to Arweave TX
-3. Use Akash for API
-
-## Step 6: Update Environment Variables
-
-After deployment, update secrets:
-
-```bash
-# Get deployment info
-akash provider lease-logs \
-  --owner $(akash keys show $AKASH_KEY_NAME -a) \
-  --dseq <deployment-sequence> \
-  --gseq 1 \
-  --oseq 1 \
-  --provider <provider-address> \
-  --node $AKASH_NODE
-```
-
-To update environment variables, you need to close and redeploy with updated manifest.
-
-## Step 7: Monitor Deployment
-
-```bash
-# View logs
-akash provider lease-logs \
-  --owner $(akash keys show $AKASH_KEY_NAME -a) \
-  --dseq <deployment-sequence> \
-  --provider <provider-address> \
-  --follow \
-  --node $AKASH_NODE
-
-# Shell into container
-akash provider lease-shell \
-  --owner $(akash keys show $AKASH_KEY_NAME -a) \
-  --dseq <deployment-sequence> \
-  --provider <provider-address> \
-  --node $AKASH_NODE
-```
-
-## Step 8: Test Auth Backend
-
-```bash
-# Health check
 curl https://auth.alternatefutures.ai/health
-
-# Test email request
-curl -X POST https://auth.alternatefutures.ai/auth/email/request \
-  -H 'Content-Type: application/json' \
-  -d '{"email":"test@example.com"}'
 ```
 
-## Cost Estimate
-
-Typical Akash costs for this deployment:
-- **CPU**: 0.5 units
-- **Memory**: 512Mi
-- **Storage**: 1Gi
-
-**Estimated cost**: ~$3-5/month (80% cheaper than AWS/Railway)
-
-## Advantages of Akash
-
-1. ✅ **Truly Decentralized**: No single point of failure
-2. ✅ **Censorship Resistant**: Cannot be shut down
-3. ✅ **Cost Effective**: Much cheaper than centralized clouds
-4. ✅ **DePIN Native**: Fits your philosophy
-5. ✅ **Open Source**: Full control
-
-## Disadvantages vs Railway
-
-1. ❌ **More Complex**: Requires AKT tokens, wallet management
-2. ❌ **No Auto SSL**: Need to handle certificates manually
-3. ❌ **Less Tooling**: No fancy dashboard like Railway
-4. ❌ **Provider Availability**: Depends on provider uptime
-
-## Hybrid Approach (Recommended for MVP)
-
-**Phase 1**: Deploy on Railway (fast, test auth flows)
-**Phase 2**: Migrate to Akash (true decentralization)
-
-This way you can test the auth system quickly, then migrate to Akash once validated.
-
-## Fully Decentralized Stack Summary
-
+### View logs (via Akash Console):
 ```
-Frontend:       Arweave ✅
-Auth Backend:   Akash Network ✅
-Database:       GunDB/OrbitDB ✅ (to be implemented)
-Email:          Resend ⚠️ (only centralized piece)
-DNS:            Handshake ✅ (optional upgrade)
+https://deploy.cloudmos.io/deployment/akash1degudmhf24auhfnqtn99mkja3xt7clt9um77tn/<DSEQ>
 ```
 
-**99% Decentralized** - only email remains centralized (inherent to SMTP).
+### View deployment status:
+```bash
+# Using akash-mcp scripts
+cd akash-mcp && npx tsx scripts/get-service-urls.ts
+```
+
+## Troubleshooting
+
+### Manifest version validation failed
+The SDL sent by `update-manifest.yml` must match the on-chain deployment spec. The workflow handles this by running `akash tx deployment update` before `send-manifest`. If you still get this error, ensure both workflows use the same SDL structure (compute resources, placement, pricing).
+
+### Certificate errors (UnmarshalBinaryLengthPrefixed)
+Version mismatch between `akash` and `provider-services`. Both workflows install the latest versions to avoid this.
+
+### 522 Cloudflare timeout
+The SSL proxy is down or misconfigured. Check the `infrastructure-proxy` deployment (see repo-root deployment tracker for current DSEQ/IP).
+
+### Container not starting
+Check logs in Akash Console. Common causes:
+- Missing environment variables (check `redeploy-all.ts` SDL injection)
+- Database not reachable (verify PostgreSQL deployment and `DATABASE_URL`)
+- Image not found (check GHCR for the expected tag)
+
+## Cost
+
+- ~$1.93/month for 1 CPU, 1Gi RAM, 1Gi storage
+- Paid in AKT from wallet `akash1degudmhf24auhfnqtn99mkja3xt7clt9um77tn`
 
 ---
 
-Next steps:
-1. Test on Railway first
-2. Once working, migrate to Akash
-3. Replace email with XMTP for 100% decentralization
+*Last updated: 2026-02-10*

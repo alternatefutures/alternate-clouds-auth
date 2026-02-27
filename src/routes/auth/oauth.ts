@@ -4,23 +4,57 @@ import { oauthService } from '../../services/oauth.service';
 import { dbService } from '../../services/db.service';
 import { jwtService } from '../../services/jwt.service';
 import { standardRateLimit } from '../../middleware/ratelimit';
+import { encryptForStorage, generateCodeVerifier, generateCodeChallenge } from '../../utils/crypto';
 
 const app = new Hono();
 
-// Store for OAuth state tokens (in-memory for now, use Redis in production)
-const stateStore = new Map<string, { timestamp: number; redirectUrl?: string }>();
+// OAuth state is now stored in the database (verification_code table with code_type='oauth_state')
+// This enables multi-instance deployments without shared memory
+// State data structure stored as JSON in the 'code' field:
+interface OAuthStateData {
+  redirectUrl?: string;
+  codeVerifier: string; // PKCE code verifier
+  createdAt: number;
+}
 
-// Clean up expired state tokens (older than 10 minutes)
-setInterval(() => {
-  const now = Date.now();
-  const tenMinutesAgo = now - 10 * 60 * 1000;
+function getAllowedRedirectOrigins(): string[] {
+  const configured = (process.env.ALLOWED_REDIRECT_ORIGINS || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
 
-  for (const [state, data] of stateStore.entries()) {
-    if (data.timestamp < tenMinutesAgo) {
-      stateStore.delete(state);
-    }
+  const appUrl = process.env.APP_URL ? [process.env.APP_URL] : [];
+
+  // Default allowlist: APP_URL only (plus any explicit origins)
+  return Array.from(new Set([...appUrl, ...configured]));
+}
+
+function isAllowedRedirectUrl(candidate?: string): boolean {
+  if (!candidate) return false;
+  try {
+    const url = new URL(candidate);
+    const allowedOrigins = getAllowedRedirectOrigins();
+    return allowedOrigins.includes(url.origin);
+  } catch {
+    return false;
   }
-}, 60 * 1000); // Run every minute
+}
+
+/**
+ * GET /auth/oauth/providers
+ * Get list of configured OAuth providers
+ * NOTE: Must be defined BEFORE /:provider to avoid being caught by wildcard
+ */
+app.get('/providers', (c) => {
+  const providers = oauthService.getConfiguredProviders();
+
+  return c.json({
+    providers: providers.map((name) => ({
+      name,
+      authUrl: `/auth/oauth/${name}`,
+    })),
+  });
+});
 
 /**
  * GET /auth/oauth/:provider
@@ -40,17 +74,38 @@ app.get('/:provider', standardRateLimit, async (c) => {
     }
 
     // Generate state token for CSRF protection
-    const state = nanoid();
-    const redirectUrl = c.req.query('redirect_url');
+    const state = nanoid(32);
+    const redirectUrlCandidate = c.req.query('redirect_url');
+    const redirectUrl = isAllowedRedirectUrl(redirectUrlCandidate)
+      ? redirectUrlCandidate
+      : undefined;
 
-    // Store state token
-    stateStore.set(state, {
-      timestamp: Date.now(),
+    // Generate PKCE values (OAuth 2.1 requirement)
+    const codeVerifier = generateCodeVerifier();
+    const codeChallenge = generateCodeChallenge(codeVerifier);
+
+    // Store state in database for multi-instance support
+    const stateData: OAuthStateData = {
       redirectUrl,
+      codeVerifier,
+      createdAt: Date.now(),
+    };
+    const stateExpiresAt = Date.now() + 10 * 60 * 1000; // 10 minutes
+
+    await dbService.createVerificationCode({
+      id: nanoid(),
+      code_type: 'oauth_state',
+      identifier: state,
+      code: JSON.stringify(stateData),
+      expires_at: stateExpiresAt,
+      attempts: 0,
+      max_attempts: 1, // Single use
+      verified: 0,
+      ip_address: c.req.header('x-forwarded-for') || c.req.header('x-real-ip'),
     });
 
-    // Generate authorization URL
-    const authUrl = oauthService.getAuthorizationUrl(provider, state);
+    // Generate authorization URL with PKCE
+    const authUrl = oauthService.getAuthorizationUrl(provider, state, codeChallenge);
 
     if (!authUrl) {
       return c.json({ error: 'Failed to generate authorization URL' }, 500);
@@ -85,20 +140,40 @@ app.get('/callback/:provider', async (c) => {
       return c.json({ error: 'Missing code or state parameter' }, 400);
     }
 
-    // Verify state token
-    const stateData = stateStore.get(state);
-    if (!stateData) {
+    // Verify state token from database
+    const stateRecord = await dbService.getVerificationCode(state, 'oauth_state');
+    if (!stateRecord) {
       return c.json({ error: 'Invalid or expired state token' }, 400);
     }
 
-    // Remove used state token
-    stateStore.delete(state);
+    // Check if state has expired
+    if (Date.now() > stateRecord.expires_at) {
+      await dbService.markVerificationCodeAsUsed(stateRecord.id);
+      return c.json({ error: 'State token expired' }, 400);
+    }
 
-    // Exchange code for access token
-    const accessToken = await oauthService.exchangeCodeForToken(provider, code);
+    // Parse state data
+    let stateData: OAuthStateData;
+    try {
+      stateData = JSON.parse(stateRecord.code) as OAuthStateData;
+    } catch {
+      await dbService.markVerificationCodeAsUsed(stateRecord.id);
+      return c.json({ error: 'Invalid state data' }, 400);
+    }
+
+    // Mark state as used (single use)
+    await dbService.markVerificationCodeAsUsed(stateRecord.id);
+
+    // Exchange code for access token with PKCE code verifier
+    const accessToken = await oauthService.exchangeCodeForToken(provider, code, stateData.codeVerifier);
 
     // Get user info from provider
     const oauthUserInfo = await oauthService.getUserInfo(provider, accessToken);
+
+    // Normalize email to lowercase for case-insensitive uniqueness
+    if (oauthUserInfo.email) {
+      oauthUserInfo.email = oauthUserInfo.email.toLowerCase();
+    }
 
     // Check if user exists with this OAuth provider
     const identifier = `${provider}:${oauthUserInfo.id}`;
@@ -123,6 +198,23 @@ app.get('/callback/:provider', async (c) => {
         oauth_access_token: accessToken,
         last_used_at: Date.now(),
       });
+
+      // Check if existing user has an organization, create one if not
+      const existingOrgs = await dbService.getOrganizationsByUserId(user.id);
+      if (existingOrgs.length === 0) {
+        const orgSlug = `user-${user.id.slice(0, 8)}`;
+        const orgName = oauthUserInfo.name || oauthUserInfo.email?.split('@')[0] || 'My Organization';
+        await dbService.createDefaultOrganizationForUser({
+          orgId: nanoid(),
+          memberId: nanoid(),
+          billingId: nanoid(),
+          billingCustomerId: nanoid(),
+          subscriptionId: nanoid(),
+          userId: user.id,
+          orgSlug,
+          orgName: `${orgName}'s Org`,
+        });
+      }
     } else {
       // Create new user
       user = await dbService.createUser({
@@ -145,6 +237,20 @@ app.get('/callback/:provider', async (c) => {
         verified: 1,
         is_primary: 1,
       });
+
+      // Create default organization for new user
+      const orgSlug = `user-${user.id.slice(0, 8)}`;
+      const orgName = oauthUserInfo.name || oauthUserInfo.email?.split('@')[0] || 'My Organization';
+      await dbService.createDefaultOrganizationForUser({
+        orgId: nanoid(),
+        memberId: nanoid(),
+        billingId: nanoid(),
+        billingCustomerId: nanoid(),
+        subscriptionId: nanoid(),
+        userId: user.id,
+        orgSlug,
+        orgName: `${orgName}'s Org`,
+      });
     }
 
     // Generate JWT tokens
@@ -165,33 +271,40 @@ app.get('/callback/:provider', async (c) => {
       revoked: 0,
     });
 
-    // Build redirect URL with tokens
-    const redirectUrl = stateData.redirectUrl || process.env.APP_URL || 'http://localhost:5173';
-    const redirectParams = new URLSearchParams({
-      access_token: jwtAccessToken,
-      refresh_token: refreshToken,
+    // Create one-time exchange code instead of leaking tokens via URL
+    const exchangeCode = nanoid(32);
+    const exchangeExpiresAt = Date.now() + 60 * 1000; // 60 seconds
+
+    // SECURITY: Encrypt the token payload before storage
+    const tokenPayload = JSON.stringify({
+      accessToken: jwtAccessToken,
+      refreshToken,
+      userId: user.id,
+      email: user.email,
+    });
+    const encryptedPayload = encryptForStorage(tokenPayload);
+
+    await dbService.createVerificationCode({
+      id: nanoid(),
+      code_type: 'oauth_exchange',
+      identifier: exchangeCode,
+      code: encryptedPayload, // Encrypted, not plaintext
+      expires_at: exchangeExpiresAt,
+      attempts: 0,
+      max_attempts: 1,
+      verified: 0,
+      ip_address: c.req.header('x-forwarded-for') || c.req.header('x-real-ip'),
     });
 
-    return c.redirect(`${redirectUrl}?${redirectParams.toString()}`);
+    const redirectUrl = stateData.redirectUrl || process.env.APP_URL || 'http://localhost:5173';
+    const redirect = new URL(redirectUrl);
+    redirect.searchParams.set('code', exchangeCode);
+
+    return c.redirect(redirect.toString());
   } catch (error) {
     console.error('OAuth callback error:', error);
     return c.json({ error: 'OAuth authentication failed' }, 500);
   }
-});
-
-/**
- * GET /auth/oauth/providers
- * Get list of configured OAuth providers
- */
-app.get('/providers', (c) => {
-  const providers = oauthService.getConfiguredProviders();
-
-  return c.json({
-    providers: providers.map((name) => ({
-      name,
-      authUrl: `/auth/oauth/${name}`,
-    })),
-  });
 });
 
 export default app;

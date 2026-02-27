@@ -22,31 +22,32 @@ export class JWTService {
   }
 
   private get accessTokenSecret(): string {
-    return secretsService.get('JWT_SECRET') || 'development-secret';
+    const secret = secretsService.get('JWT_SECRET');
+    if (!secret) {
+      if (process.env.NODE_ENV === 'production') {
+        throw new Error('FATAL: JWT_SECRET is not set. Refusing to start in production without a proper secret.');
+      }
+      return 'development-secret';
+    }
+    return secret;
   }
 
   private get refreshTokenSecret(): string {
-    return secretsService.get('JWT_REFRESH_SECRET') || 'development-refresh-secret';
+    const secret = secretsService.get('JWT_REFRESH_SECRET');
+    if (!secret) {
+      if (process.env.NODE_ENV === 'production') {
+        throw new Error('FATAL: JWT_REFRESH_SECRET is not set. Refusing to start in production without a proper secret.');
+      }
+      return 'development-refresh-secret';
+    }
+    return secret;
   }
 
   /**
    * Generate an access token (short-lived)
    */
   generateAccessToken(userId: string, email?: string): string {
-    const sessionId = nanoid();
-
-    const payload: TokenPayload = {
-      userId,
-      email,
-      sessionId,
-      type: 'access',
-    };
-
-    return jwt.sign(payload, this.accessTokenSecret, {
-      expiresIn: this.expiryConfig.accessTokenExpiry as string,
-      issuer: 'alternatefutures-auth',
-      audience: 'alternatefutures-app',
-    } as SignOptions);
+    return this.generateAccessTokenForSession(userId, nanoid(), email);
   }
 
   /**
@@ -76,20 +77,7 @@ export class JWTService {
   } {
     const sessionId = nanoid();
 
-    const accessToken = jwt.sign(
-      {
-        userId,
-        email,
-        sessionId,
-        type: 'access',
-      } as TokenPayload,
-      this.accessTokenSecret,
-      {
-        expiresIn: this.expiryConfig.accessTokenExpiry as string,
-        issuer: 'alternatefutures-auth',
-        audience: 'alternatefutures-app',
-      } as SignOptions
-    );
+    const accessToken = this.generateAccessTokenForSession(userId, sessionId, email);
 
     const refreshToken = jwt.sign(
       {
@@ -110,6 +98,25 @@ export class JWTService {
       refreshToken,
       sessionId,
     };
+  }
+
+  /**
+   * Generate an access token for an existing session
+   * (used when refreshing tokens so sessionId remains stable)
+   */
+  generateAccessTokenForSession(userId: string, sessionId: string, email?: string): string {
+    const payload: TokenPayload = {
+      userId,
+      email,
+      sessionId,
+      type: 'access',
+    };
+
+    return jwt.sign(payload, this.accessTokenSecret, {
+      expiresIn: this.expiryConfig.accessTokenExpiry as string,
+      issuer: 'alternatefutures-auth',
+      audience: 'alternatefutures-app',
+    } as SignOptions);
   }
 
   /**

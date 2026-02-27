@@ -44,12 +44,21 @@ app.post('/refresh', standardRateLimit, async (c) => {
       return c.json({ error: 'User not found' }, 404);
     }
 
-    // Generate new access token (same session)
-    const accessToken = jwtService.generateAccessToken(user.id, user.email);
+    // Rotate refresh token (one-time use) + issue new access token for same session
+    const newAccessToken = jwtService.generateAccessTokenForSession(
+      user.id,
+      payload.sessionId,
+      user.email
+    );
+    const newRefreshToken = jwtService.generateRefreshToken(user.id, payload.sessionId);
+
+    const newExpiresAt = Date.now() + 7 * 24 * 60 * 60 * 1000; // 7 days
+    await dbService.rotateSessionRefreshToken(payload.sessionId, newRefreshToken, newExpiresAt);
 
     return c.json({
       success: true,
-      accessToken,
+      accessToken: newAccessToken,
+      refreshToken: newRefreshToken,
       user: {
         id: user.id,
         email: user.email,
@@ -105,7 +114,7 @@ app.post('/logout', authMiddleware, async (c) => {
 
 /**
  * GET /auth/me
- * Get current authenticated user
+ * Get current authenticated user with organizations
  */
 app.get('/me', authMiddleware, async (c) => {
   try {
@@ -117,6 +126,9 @@ app.get('/me', authMiddleware, async (c) => {
     if (!user) {
       return c.json({ error: 'User not found' }, 404);
     }
+
+    // Get user's organizations
+    const organizations = await dbService.getOrganizationsByUserId(authUser.userId);
 
     return c.json({
       user: {
@@ -130,6 +142,13 @@ app.get('/me', authMiddleware, async (c) => {
         createdAt: new Date(user.created_at).toISOString(),
         lastLoginAt: user.last_login_at ? new Date(user.last_login_at).toISOString() : null,
       },
+      organizations: organizations.map((org) => ({
+        id: org.id,
+        slug: org.slug,
+        name: org.name,
+        avatarUrl: org.avatar_url,
+        role: org.role,
+      })),
     });
   } catch (error) {
     console.error('Get user error:', error);

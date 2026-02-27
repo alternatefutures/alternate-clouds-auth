@@ -1,9 +1,11 @@
 import { Hono } from 'hono';
 import { z } from 'zod';
-import { dbService } from '../../services/db.service.js';
-import { TokenService } from '../../services/token.service.js';
-import { authMiddleware, requireAuthUser } from '../../middleware/auth.js';
-import { standardRateLimit } from '../../middleware/ratelimit.js';
+import { dbService } from '../../services/db.service';
+import { TokenService } from '../../services/token.service';
+import { jwtService } from '../../services/jwt.service';
+import { authMiddleware, requireAuthUser } from '../../middleware/auth';
+import { standardRateLimit } from '../../middleware/ratelimit';
+import { timingSafeCompare } from '../../utils/crypto';
 
 const app = new Hono();
 const tokenService = new TokenService(dbService);
@@ -15,6 +17,7 @@ app.use('/', authMiddleware);
 // Schema for creating a token
 const createTokenSchema = z.object({
   name: z.string().min(1).max(100),
+  organizationId: z.string().optional(),
   expiresAt: z.number().optional(),
 });
 
@@ -28,16 +31,28 @@ app.post('/', standardRateLimit, async (c) => {
 
     // Validate request body
     const body = await c.req.json();
-    const { name, expiresAt } = createTokenSchema.parse(body);
+    const { name, organizationId, expiresAt } = createTokenSchema.parse(body);
+
+    // If organizationId provided, verify user is a member
+    if (organizationId) {
+      const isMember = await dbService.isUserMemberOfOrganization(authUser.userId, organizationId);
+      if (!isMember) {
+        return c.json({
+          error: 'You are not a member of this organization',
+          code: 'NOT_ORG_MEMBER',
+        }, 403);
+      }
+    }
 
     // Create token
-    const token = await tokenService.createToken(authUser.userId, name, expiresAt);
+    const token = await tokenService.createToken(authUser.userId, name, expiresAt, organizationId);
 
     return c.json({
       success: true,
       token: {
         id: token.id,
         name: token.name,
+        organizationId: token.organizationId,
         token: token.token, // Only returned on creation
         expiresAt: token.expiresAt ? new Date(token.expiresAt).toISOString() : null,
         createdAt: new Date(token.createdAt).toISOString(),
@@ -97,6 +112,7 @@ app.get('/', standardRateLimit, async (c) => {
       tokens: tokens.map((t) => ({
         id: t.id,
         name: t.name,
+        organizationId: t.organizationId,
         expiresAt: t.expiresAt ? new Date(t.expiresAt).toISOString() : null,
         lastUsedAt: t.lastUsedAt ? new Date(t.lastUsedAt).toISOString() : null,
         createdAt: new Date(t.createdAt).toISOString(),
@@ -150,25 +166,54 @@ const validateTokenSchema = z.object({
 
 app.post('/validate', standardRateLimit, async (c) => {
   try {
+    // Optional hardening: require an internal shared secret for introspection
+    const introspectionSecret = process.env.AUTH_INTROSPECTION_SECRET;
+    if (introspectionSecret) {
+      const provided = c.req.header('x-af-introspection-secret');
+      // SECURITY: Use timing-safe comparison to prevent timing attacks
+      if (!provided || !timingSafeCompare(provided, introspectionSecret)) {
+        return c.json({ valid: false, error: 'Unauthorized' }, 401);
+      }
+    }
+
     // Validate request body
     const body = await c.req.json();
     const { token } = validateTokenSchema.parse(body);
 
-    // Validate token
-    const result = await tokenService.validateToken(token);
+    // First, try to validate as a Personal Access Token (PAT)
+    const patResult = await tokenService.validateToken(token);
 
-    if (!result) {
+    if (patResult) {
+      // Enrich with basic user profile (helps internal consumers like service-cloud-api)
+      const user = await dbService.getUserById(patResult.userId);
+      return c.json({
+        valid: true,
+        userId: patResult.userId,
+        tokenId: patResult.tokenId,
+        organizationId: patResult.organizationId,
+        email: user?.email ?? null,
+        displayName: user?.display_name ?? null,
+        avatarUrl: user?.avatar_url ?? null,
+      });
+    }
+
+    // If PAT validation failed, try JWT access token validation
+    try {
+      const jwtPayload = jwtService.verifyAccessToken(token);
+      
+      return c.json({
+        valid: true,
+        userId: jwtPayload.userId,
+        tokenId: jwtPayload.sessionId, // Use sessionId as tokenId for JWT
+        // JWT tokens don't have organizationId embedded
+      });
+    } catch {
+      // JWT validation also failed
       return c.json({
         valid: false,
         error: 'Invalid or expired token',
       }, 401);
     }
-
-    return c.json({
-      valid: true,
-      userId: result.userId,
-      tokenId: result.tokenId,
-    });
   } catch (error) {
     console.error('Validate token error:', error);
 

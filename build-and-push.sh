@@ -1,5 +1,5 @@
 #!/bin/bash
-# Build and push auth-service Docker image (code only, no secrets)
+# Build and push service-auth Docker image (code only, no secrets)
 #
 # Usage: ./build-and-push.sh [tag]
 #
@@ -10,7 +10,7 @@
 
 set -e
 
-IMAGE_NAME="ghcr.io/alternatefutures/auth-service"
+IMAGE_NAME="ghcr.io/alternatefutures/service-auth"
 TAG="${1:-latest}"
 
 echo "Building Docker image (code only, no secrets)..."

@@ -171,12 +171,13 @@ export class StripeProvider implements PaymentProvider {
     }
 
     // If charging on a connected account, use stripeAccount header
-    const options: Stripe.RequestOptions = {};
-    if (input.connectedAccountId) {
-      options.stripeAccount = input.connectedAccountId;
-    }
+    const options: Stripe.RequestOptions | undefined = input.connectedAccountId
+      ? { stripeAccount: input.connectedAccountId }
+      : undefined;
 
-    const intent = await this.stripe.paymentIntents.create(params, options);
+    const intent = options
+      ? await this.stripe.paymentIntents.create(params, options)
+      : await this.stripe.paymentIntents.create(params);
 
     return this.mapPaymentIntent(intent);
   }
@@ -218,8 +219,10 @@ export class StripeProvider implements PaymentProvider {
       id: intent.id,
       status: statusMap[intent.status] || 'failed',
       amount: intent.amount,
+      amountReceived: intent.amount_received,
       currency: intent.currency,
       clientSecret: intent.client_secret || undefined,
+      metadata: intent.metadata as Record<string, string>,
     };
   }
 

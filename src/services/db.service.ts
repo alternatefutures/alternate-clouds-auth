@@ -1,9 +1,34 @@
 /**
  * Database service for interacting with PostgreSQL via Prisma
  * Migrated from SQLite (better-sqlite3) to PostgreSQL for shared database with service-cloud-api
+ * 
+ * SECURITY: Sensitive tokens (refresh tokens, etc.) are hashed before storage
  */
 
 import { PrismaClient } from '@prisma/client';
+import { createHash, timingSafeEqual } from 'node:crypto';
+
+/**
+ * Hash a token/secret using SHA-256 for storage at rest
+ */
+function hashTokenForStorage(token: string): string {
+  return createHash('sha256').update(token, 'utf8').digest('hex');
+}
+
+/**
+ * Verify a token against its hash using timing-safe comparison
+ */
+function verifyTokenHashInternal(token: string, hash: string): boolean {
+  const tokenHash = hashTokenForStorage(token);
+  if (tokenHash.length !== hash.length) {
+    return false;
+  }
+  try {
+    return timingSafeEqual(Buffer.from(tokenHash, 'utf8'), Buffer.from(hash, 'utf8'));
+  } catch {
+    return false;
+  }
+}
 
 // ============================================
 // LEGACY INTERFACES (kept for API compatibility)
@@ -53,7 +78,9 @@ export interface Session {
 
 export interface VerificationCode {
   id: string;
-  code_type: 'email' | 'sms' | 'mfa';
+  // NOTE: Prisma stores this as a string; we keep a union for known types,
+  // but may also use additional internal types (e.g. oauth exchange / cli sessions).
+  code_type: 'email' | 'sms' | 'mfa' | 'oauth_exchange' | 'oauth_state' | 'cli_session';
   identifier: string;
   code: string;
   expires_at: number;
@@ -80,10 +107,45 @@ export interface SIWEChallenge {
 export interface PersonalAccessToken {
   id: string;
   user_id: string;
+  organization_id?: string;
   name: string;
   token: string;
   expires_at?: number;
   last_used_at?: number;
+  created_at: number;
+  updated_at: number;
+}
+
+// ============================================
+// ORGANIZATION INTERFACES
+// ============================================
+
+export type OrgRole = 'OWNER' | 'ADMIN' | 'MEMBER';
+
+export interface Organization {
+  id: string;
+  slug: string;
+  name: string;
+  avatar_url?: string;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface OrganizationMember {
+  id: string;
+  organization_id: string;
+  user_id: string;
+  role: OrgRole;
+  created_at: number;
+}
+
+export interface OrganizationBilling {
+  id: string;
+  organization_id: string;
+  stripe_customer_id?: string;
+  trial_started_at?: number;
+  trial_ends_at?: number;
+  trial_converted: boolean;
   created_at: number;
   updated_at: number;
 }
@@ -125,15 +187,23 @@ export interface PaymentMethod {
   updated_at: number;
 }
 
-export type SubscriptionPlanName = 'FREE' | 'STARTER' | 'PRO' | 'ENTERPRISE';
+export type SubscriptionPlanName = 'MONTHLY' | 'YEARLY' | string; // legacy: FREE, STARTER, PRO, ENTERPRISE
+export type BillingInterval = 'MONTHLY' | 'YEARLY';
 
 export interface SubscriptionPlan {
   id: string;
   name: SubscriptionPlanName;
   base_price_per_seat: number;
   usage_markup: number;
+  billing_interval: BillingInterval;
+  is_active: boolean;
   features?: string;
   stripe_price_id?: string;
+  included_storage_gb: number;
+  included_bandwidth_gb: number;
+  included_invocations: number;
+  included_compute_seconds: number;
+  trial_days: number;
   created_at: number;
   updated_at: number;
 }
@@ -305,6 +375,68 @@ export interface PlatformFee {
 }
 
 // ============================================
+// USAGE WALLET INTERFACES (USD cents)
+// ============================================
+
+export type UsageLedgerDirection = 'CREDIT' | 'DEBIT';
+
+export interface OrganizationUsageBalance {
+  id: string;
+  org_billing_id: string;
+  balance_cents: number; // USD cents (e.g., 2500 = $25.00)
+  updated_at: number;
+  created_at: number;
+}
+
+export interface OrganizationUsageLedger {
+  id: string;
+  org_billing_id: string;
+  actor_user_id?: string;
+  direction: UsageLedgerDirection;
+  amount_cents: number; // USD cents
+  reason: string;
+  idempotency_key: string;
+  metadata: Record<string, unknown>;
+  created_at: number;
+}
+
+export interface OrganizationUsageLog {
+  id: string;
+  org_billing_id: string;
+  user_id: string;
+  service_type: string; // ai_inference, compute, storage, bandwidth, etc.
+  provider: string;
+  resource: string;
+  model?: string;
+  usd_cost_raw: number;
+  margin_rate: number;
+  usd_charged: number;
+  request_id?: string;
+  metadata: Record<string, unknown>;
+  created_at: number;
+}
+
+export interface OrganizationUsageCostsPrivate {
+  id: string;
+  org_billing_id: string;
+  user_id: string;
+  service_type: string;
+  provider: string;
+  resource: string;
+  model?: string;
+  usd_cost_raw: number;
+  usd_charged: number;
+  margin_rate: number;
+  margin_usd: number;
+  metadata: Record<string, unknown>;
+  created_at: number;
+}
+
+// Default usage margin rate — used as fallback when org has no active subscription.
+// Per-plan markup (from SubscriptionPlan.usageMarkup) is preferred; see costMetering.ts.
+export const USAGE_MARGIN_RATE = parseFloat(process.env.USAGE_MARGIN_RATE || '0.25'); // 25% default
+
+// ============================================
 // HELPER FUNCTIONS
 // ============================================
 
@@ -345,6 +477,49 @@ export class DatabaseService {
   }
 
   /**
+   * Health check: verify DB connectivity, count tables and subscription plans.
+   * Used by /health/db endpoint.
+   */
+  async healthCheck(): Promise<{
+    status: 'ok' | 'degraded' | 'error';
+    db: boolean;
+    plans: number;
+    tables: number;
+    latencyMs: number;
+    error?: string;
+  }> {
+    const start = Date.now();
+    try {
+      // Verify connectivity with a simple query
+      await this.prisma.$queryRawUnsafe('SELECT 1');
+      const dbOk = true;
+
+      // Count subscription plans
+      const plans = await this.prisma.subscriptionPlan.count();
+
+      // Count tables in the database (PostgreSQL-specific)
+      const tableResult = await this.prisma.$queryRawUnsafe<{ count: bigint }[]>(
+        `SELECT COUNT(*) as count FROM information_schema.tables WHERE table_schema = 'public' AND table_type = 'BASE TABLE'`
+      );
+      const tables = Number(tableResult[0]?.count ?? 0);
+
+      const latencyMs = Date.now() - start;
+      const status = plans > 0 && tables > 3 ? 'ok' : 'degraded';
+
+      return { status, db: dbOk, plans, tables, latencyMs };
+    } catch (e: any) {
+      return {
+        status: 'error',
+        db: false,
+        plans: 0,
+        tables: 0,
+        latencyMs: Date.now() - start,
+        error: e.message || String(e),
+      };
+    }
+  }
+
+  /**
    * Close database connection
    */
   async close(): Promise<void> {
@@ -352,46 +527,18 @@ export class DatabaseService {
   }
 
   /**
-   * Seed default subscription plans if they don't exist
+   * Verify subscription plans exist on startup.
+   * Plans are seeded externally via `npm run db:seed` (scripts/seed-plans.ts).
+   * This method only logs a warning if no active plans are found.
    */
   private async seedDefaultPlans(): Promise<void> {
-    const plans = [
-      {
-        id: 'plan_free',
-        name: 'FREE',
-        basePricePerSeat: 0,
-        usageMarkup: 0.2,
-        features: JSON.stringify(['1 project', '1GB storage', '10GB bandwidth/month']),
-      },
-      {
-        id: 'plan_starter',
-        name: 'STARTER',
-        basePricePerSeat: 1900,
-        usageMarkup: 0.1,
-        features: JSON.stringify(['5 projects', '10GB storage', '100GB bandwidth/month']),
-      },
-      {
-        id: 'plan_pro',
-        name: 'PRO',
-        basePricePerSeat: 4900,
-        usageMarkup: 0,
-        features: JSON.stringify(['Unlimited projects', '100GB storage', '1TB bandwidth/month']),
-      },
-      {
-        id: 'plan_enterprise',
-        name: 'ENTERPRISE',
-        basePricePerSeat: 0,
-        usageMarkup: 0,
-        features: JSON.stringify(['Custom limits', 'SLA', 'Dedicated support']),
-      },
-    ];
-
-    for (const plan of plans) {
-      await this.prisma.subscriptionPlan.upsert({
-        where: { id: plan.id },
-        update: {},
-        create: plan,
-      });
+    const count = await this.prisma.subscriptionPlan.count({
+      where: { isActive: true },
+    });
+    if (count === 0) {
+      console.warn(
+        '⚠️  No active subscription plans found. Run: npm run db:seed'
+      );
     }
   }
 
@@ -403,7 +550,7 @@ export class DatabaseService {
     const result = await this.prisma.authUser.create({
       data: {
         id: user.id,
-        email: user.email,
+        email: user.email?.toLowerCase(),
         emailVerified: intToBool(user.email_verified),
         phone: user.phone,
         phoneVerified: intToBool(user.phone_verified),
@@ -446,7 +593,7 @@ export class DatabaseService {
   }
 
   async getUserByEmail(email: string): Promise<User | null> {
-    const result = await this.prisma.authUser.findUnique({ where: { email } });
+    const result = await this.prisma.authUser.findUnique({ where: { email: email.toLowerCase() } });
     if (!result) return null;
 
     return {
@@ -524,7 +671,7 @@ export class DatabaseService {
 
     return {
       id: result.id,
-      code_type: result.codeType as 'email' | 'sms' | 'mfa',
+      code_type: result.codeType as VerificationCode['code_type'],
       identifier: result.identifier,
       code: result.code,
       expires_at: result.expiresAt.getTime(),
@@ -551,7 +698,7 @@ export class DatabaseService {
 
     return {
       id: result.id,
-      code_type: result.codeType as 'email' | 'sms' | 'mfa',
+      code_type: result.codeType as VerificationCode['code_type'],
       identifier: result.identifier,
       code: result.code,
       expires_at: result.expiresAt.getTime(),
@@ -583,16 +730,28 @@ export class DatabaseService {
     });
   }
 
+  async updateVerificationCodeValue(id: string, code: string): Promise<void> {
+    await this.prisma.verificationCode.update({
+      where: { id },
+      data: {
+        code,
+      },
+    });
+  }
+
   // ============================================
   // SESSION METHODS
   // ============================================
 
   async createSession(session: Omit<Session, 'created_at' | 'last_activity_at'>): Promise<Session> {
+    // SECURITY: Hash refresh token before storage
+    const refreshTokenHash = hashTokenForStorage(session.refresh_token);
+    
     const result = await this.prisma.authSession.create({
       data: {
         id: session.id,
         userId: session.user_id,
-        refreshToken: session.refresh_token,
+        refreshToken: refreshTokenHash, // Store hash, not plaintext
         userAgent: session.user_agent,
         ipAddress: session.ip_address,
         deviceId: session.device_id,
@@ -605,7 +764,7 @@ export class DatabaseService {
     return {
       id: result.id,
       user_id: result.userId,
-      refresh_token: result.refreshToken,
+      refresh_token: result.refreshToken, // Returns hash (caller should keep original)
       user_agent: result.userAgent ?? undefined,
       ip_address: result.ipAddress ?? undefined,
       device_id: result.deviceId ?? undefined,
@@ -618,9 +777,12 @@ export class DatabaseService {
   }
 
   async getSessionByRefreshToken(refreshToken: string): Promise<Session | null> {
+    // SECURITY: Hash the token to look up by stored hash
+    const refreshTokenHash = hashTokenForStorage(refreshToken);
+    
     const result = await this.prisma.authSession.findFirst({
       where: {
-        refreshToken,
+        refreshToken: refreshTokenHash,
         revoked: false,
       },
     });
@@ -667,6 +829,20 @@ export class DatabaseService {
       data: {
         revoked: true,
         revokedAt: new Date(),
+      },
+    });
+  }
+
+  async rotateSessionRefreshToken(sessionId: string, newRefreshToken: string, newExpiresAt: number): Promise<void> {
+    // SECURITY: Hash the new refresh token before storage
+    const refreshTokenHash = hashTokenForStorage(newRefreshToken);
+    
+    await this.prisma.authSession.update({
+      where: { id: sessionId },
+      data: {
+        refreshToken: refreshTokenHash,
+        expiresAt: new Date(newExpiresAt),
+        lastActivityAt: new Date(),
       },
     });
   }
@@ -940,6 +1116,7 @@ export class DatabaseService {
       data: {
         id: pat.id,
         userId: pat.user_id,
+        organizationId: pat.organization_id,
         name: pat.name,
         token: pat.token,
         expiresAt: timestampToDate(pat.expires_at),
@@ -950,6 +1127,7 @@ export class DatabaseService {
     return {
       id: result.id,
       user_id: result.userId,
+      organization_id: result.organizationId ?? undefined,
       name: result.name,
       token: result.token,
       expires_at: dateToTimestamp(result.expiresAt),
@@ -966,6 +1144,7 @@ export class DatabaseService {
     return {
       id: result.id,
       user_id: result.userId,
+      organization_id: result.organizationId ?? undefined,
       name: result.name,
       token: result.token,
       expires_at: dateToTimestamp(result.expiresAt),
@@ -984,6 +1163,7 @@ export class DatabaseService {
     return results.map((result) => ({
       id: result.id,
       user_id: result.userId,
+      organization_id: result.organizationId ?? undefined,
       name: result.name,
       token: result.token,
       expires_at: dateToTimestamp(result.expiresAt),
@@ -1017,6 +1197,7 @@ export class DatabaseService {
     return {
       id: result.id,
       user_id: result.userId,
+      organization_id: result.organizationId ?? undefined,
       name: result.name,
       token: result.token,
       expires_at: dateToTimestamp(result.expiresAt),
@@ -1039,6 +1220,368 @@ export class DatabaseService {
       },
     });
     return result.count;
+  }
+
+  // ============================================
+  // ORGANIZATION METHODS
+  // ============================================
+
+  async createOrganization(org: Omit<Organization, 'created_at' | 'updated_at'>): Promise<Organization> {
+    const result = await this.prisma.organization.create({
+      data: {
+        id: org.id,
+        slug: org.slug,
+        name: org.name,
+        avatarUrl: org.avatar_url,
+      },
+    });
+
+    return {
+      id: result.id,
+      slug: result.slug,
+      name: result.name,
+      avatar_url: result.avatarUrl ?? undefined,
+      created_at: result.createdAt.getTime(),
+      updated_at: result.updatedAt.getTime(),
+    };
+  }
+
+  async getOrganizationById(id: string): Promise<Organization | null> {
+    const result = await this.prisma.organization.findUnique({ where: { id } });
+    if (!result) return null;
+
+    return {
+      id: result.id,
+      slug: result.slug,
+      name: result.name,
+      avatar_url: result.avatarUrl ?? undefined,
+      created_at: result.createdAt.getTime(),
+      updated_at: result.updatedAt.getTime(),
+    };
+  }
+
+  async getOrganizationBySlug(slug: string): Promise<Organization | null> {
+    const result = await this.prisma.organization.findUnique({ where: { slug } });
+    if (!result) return null;
+
+    return {
+      id: result.id,
+      slug: result.slug,
+      name: result.name,
+      avatar_url: result.avatarUrl ?? undefined,
+      created_at: result.createdAt.getTime(),
+      updated_at: result.updatedAt.getTime(),
+    };
+  }
+
+  async getOrganizationsByUserId(userId: string): Promise<Array<Organization & { role: OrgRole }>> {
+    const results = await this.prisma.organizationMember.findMany({
+      where: { userId },
+      include: { organization: true },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    return results.map((result) => ({
+      id: result.organization.id,
+      slug: result.organization.slug,
+      name: result.organization.name,
+      avatar_url: result.organization.avatarUrl ?? undefined,
+      created_at: result.organization.createdAt.getTime(),
+      updated_at: result.organization.updatedAt.getTime(),
+      role: result.role as OrgRole,
+    }));
+  }
+
+  async updateOrganization(id: string, updates: Partial<Omit<Organization, 'id' | 'created_at' | 'updated_at'>>): Promise<void> {
+    const data: Record<string, unknown> = {};
+
+    if (updates.slug !== undefined) data.slug = updates.slug;
+    if (updates.name !== undefined) data.name = updates.name;
+    if (updates.avatar_url !== undefined) data.avatarUrl = updates.avatar_url;
+
+    await this.prisma.organization.update({
+      where: { id },
+      data,
+    });
+  }
+
+  async deleteOrganization(id: string): Promise<void> {
+    await this.prisma.organization.delete({ where: { id } });
+  }
+
+  // ============================================
+  // ORGANIZATION MEMBER METHODS
+  // ============================================
+
+  async createOrganizationMember(member: Omit<OrganizationMember, 'created_at'>): Promise<OrganizationMember> {
+    const result = await this.prisma.organizationMember.create({
+      data: {
+        id: member.id,
+        organizationId: member.organization_id,
+        userId: member.user_id,
+        role: member.role,
+      },
+    });
+
+    return {
+      id: result.id,
+      organization_id: result.organizationId,
+      user_id: result.userId,
+      role: result.role as OrgRole,
+      created_at: result.createdAt.getTime(),
+    };
+  }
+
+  async getOrganizationMember(organizationId: string, userId: string): Promise<OrganizationMember | null> {
+    const result = await this.prisma.organizationMember.findUnique({
+      where: {
+        organizationId_userId: { organizationId, userId },
+      },
+    });
+
+    if (!result) return null;
+
+    return {
+      id: result.id,
+      organization_id: result.organizationId,
+      user_id: result.userId,
+      role: result.role as OrgRole,
+      created_at: result.createdAt.getTime(),
+    };
+  }
+
+  async getOrganizationMembers(organizationId: string): Promise<OrganizationMember[]> {
+    const results = await this.prisma.organizationMember.findMany({
+      where: { organizationId },
+      orderBy: { createdAt: 'asc' },
+    });
+
+    return results.map((result) => ({
+      id: result.id,
+      organization_id: result.organizationId,
+      user_id: result.userId,
+      role: result.role as OrgRole,
+      created_at: result.createdAt.getTime(),
+    }));
+  }
+
+  async updateOrganizationMemberRole(organizationId: string, userId: string, role: OrgRole): Promise<void> {
+    await this.prisma.organizationMember.update({
+      where: {
+        organizationId_userId: { organizationId, userId },
+      },
+      data: { role },
+    });
+  }
+
+  async deleteOrganizationMember(organizationId: string, userId: string): Promise<void> {
+    await this.prisma.organizationMember.delete({
+      where: {
+        organizationId_userId: { organizationId, userId },
+      },
+    });
+  }
+
+  async isUserMemberOfOrganization(userId: string, organizationId: string): Promise<boolean> {
+    const member = await this.prisma.organizationMember.findUnique({
+      where: {
+        organizationId_userId: { organizationId, userId },
+      },
+    });
+    return member !== null;
+  }
+
+  // ============================================
+  // ORGANIZATION BILLING METHODS
+  // ============================================
+
+  async createOrganizationBilling(billing: Omit<OrganizationBilling, 'created_at' | 'updated_at'>): Promise<OrganizationBilling> {
+    const result = await this.prisma.organizationBilling.create({
+      data: {
+        id: billing.id,
+        organizationId: billing.organization_id,
+        stripeCustomerId: billing.stripe_customer_id,
+        trialStartedAt: billing.trial_started_at ? new Date(billing.trial_started_at) : null,
+        trialEndsAt: billing.trial_ends_at ? new Date(billing.trial_ends_at) : null,
+        trialConverted: billing.trial_converted ?? false,
+      },
+    });
+
+    return {
+      id: result.id,
+      organization_id: result.organizationId,
+      stripe_customer_id: result.stripeCustomerId ?? undefined,
+      trial_started_at: dateToTimestamp(result.trialStartedAt),
+      trial_ends_at: dateToTimestamp(result.trialEndsAt),
+      trial_converted: result.trialConverted,
+      created_at: result.createdAt.getTime(),
+      updated_at: result.updatedAt.getTime(),
+    };
+  }
+
+  async getOrganizationBillingByOrgId(organizationId: string): Promise<OrganizationBilling | null> {
+    const result = await this.prisma.organizationBilling.findUnique({
+      where: { organizationId },
+    });
+
+    if (!result) return null;
+
+    return {
+      id: result.id,
+      organization_id: result.organizationId,
+      stripe_customer_id: result.stripeCustomerId ?? undefined,
+      trial_started_at: dateToTimestamp(result.trialStartedAt),
+      trial_ends_at: dateToTimestamp(result.trialEndsAt),
+      trial_converted: result.trialConverted,
+      created_at: result.createdAt.getTime(),
+      updated_at: result.updatedAt.getTime(),
+    };
+  }
+
+  async updateOrganizationBilling(id: string, updates: Partial<Omit<OrganizationBilling, 'id' | 'organization_id' | 'created_at' | 'updated_at'>>): Promise<void> {
+    const data: Record<string, unknown> = {};
+
+    if (updates.stripe_customer_id !== undefined) data.stripeCustomerId = updates.stripe_customer_id;
+
+    await this.prisma.organizationBilling.update({
+      where: { id },
+      data,
+    });
+  }
+
+  /**
+   * Create a default organization for a new user (with membership, billing, and trial subscription)
+   * This is called when a user signs up via email, wallet, or OAuth
+   */
+  async createDefaultOrganizationForUser(params: {
+    orgId: string;
+    memberId: string;
+    billingId: string;
+    billingCustomerId: string;
+    subscriptionId: string;
+    userId: string;
+    orgSlug: string;
+    orgName: string;
+  }): Promise<Organization> {
+    const { orgId, memberId, billingId, billingCustomerId, subscriptionId, userId, orgSlug, orgName } = params;
+
+    const now = new Date();
+
+    // Look up the default trial plan (MONTHLY, or first active plan)
+    const defaultPlan = await this.prisma.subscriptionPlan.findFirst({
+      where: { isActive: true },
+      orderBy: { basePricePerSeat: 'asc' },
+    });
+    if (!defaultPlan) {
+      throw new Error('No active subscription plan found. Run: npm run db:seed');
+    }
+
+    const trialDays = defaultPlan.trialDays || 7;
+    const trialEndsAt = new Date(now.getTime() + trialDays * 24 * 60 * 60 * 1000);
+    const periodEnd = new Date(now.getTime() + trialDays * 24 * 60 * 60 * 1000);
+
+    // Check if user already has a BillingCustomer (edge case: existing user adding via new auth method)
+    const existingBillingCustomer = await this.prisma.billingCustomer.findUnique({
+      where: { userId },
+    });
+
+    const actualBillingCustomerId = existingBillingCustomer?.id || billingCustomerId;
+
+    // Build the transaction operations
+    const operations = [
+      // 1. Create organization
+      this.prisma.organization.create({
+        data: {
+          id: orgId,
+          slug: orgSlug,
+          name: orgName,
+        },
+      }),
+
+      // 2. Create membership (OWNER)
+      this.prisma.organizationMember.create({
+        data: {
+          id: memberId,
+          organizationId: orgId,
+          userId: userId,
+          role: 'OWNER',
+        },
+      }),
+    ];
+
+    // 3. Only create BillingCustomer if user doesn't have one
+    if (!existingBillingCustomer) {
+      operations.push(
+        this.prisma.billingCustomer.create({
+          data: {
+            id: billingCustomerId,
+            userId: userId,
+          },
+        })
+      );
+    }
+
+    // 4. Create OrganizationBilling with trial tracking
+    operations.push(
+      this.prisma.organizationBilling.create({
+        data: {
+          id: billingId,
+          organizationId: orgId,
+          trialStartedAt: now,
+          trialEndsAt: trialEndsAt,
+          trialConverted: false,
+        },
+      })
+    );
+
+    // 5. Create trial subscription (links to BOTH billing entities)
+    operations.push(
+      this.prisma.subscription.create({
+        data: {
+          id: subscriptionId,
+          customerId: actualBillingCustomerId, // Use existing or new BillingCustomer
+          orgBillingId: billingId, // Optional FK to OrganizationBilling
+          planId: defaultPlan.id, // Use cheapest active plan for trial
+          status: 'TRIALING',
+          seats: 1,
+          currentPeriodStart: now,
+          currentPeriodEnd: periodEnd,
+          trialEnd: trialEndsAt,
+        },
+      })
+    );
+
+    // Execute transaction (generous timeout for high-latency Akash → remote DB connections)
+    const [org] = await this.prisma.$transaction(operations, {
+      timeout: 30000, // 30s (default is 5s, too tight for cross-datacenter Akash deploys)
+    });
+
+    // 6. Seed $5.00 signup compute credit into the org's usage wallet
+    try {
+      await this.creditOrgBalanceIdempotent({
+        orgBillingId: billingId,
+        actorUserId: userId,
+        amountCents: 500, // $5.00
+        reason: 'signup_credit',
+        idempotencyKey: `signup_credit:${billingId}`,
+        metadata: {
+          description: 'Signup compute credit',
+          orgId,
+        },
+      });
+    } catch (error) {
+      // Non-fatal: org creation succeeds even if credit seeding fails
+      console.warn(`[createDefaultOrganizationForUser] Failed to seed signup credit for org ${orgId}:`, error);
+    }
+
+    return {
+      id: org.id,
+      slug: org.slug,
+      name: org.name,
+      avatar_url: org.avatarUrl ?? undefined,
+      created_at: org.createdAt.getTime(),
+      updated_at: org.updatedAt.getTime(),
+    };
   }
 
   // ============================================
@@ -1297,35 +1840,44 @@ export class DatabaseService {
   // SUBSCRIPTION PLAN METHODS
   // ============================================
 
-  async getSubscriptionPlanByName(name: string): Promise<SubscriptionPlan | null> {
-    const result = await this.prisma.subscriptionPlan.findUnique({ where: { name } });
-    if (!result) return null;
-
+  private serializePlan(result: {
+    id: string; name: string; basePricePerSeat: number; usageMarkup: number;
+    billingInterval: string; isActive: boolean; features: string | null;
+    stripePriceId: string | null; includedStorageGb: number; includedBandwidthGb: number;
+    includedInvocations: number; includedComputeSeconds: number; trialDays: number;
+    createdAt: Date; updatedAt: Date;
+  }): SubscriptionPlan {
     return {
       id: result.id,
       name: result.name as SubscriptionPlanName,
       base_price_per_seat: result.basePricePerSeat,
       usage_markup: result.usageMarkup,
+      billing_interval: result.billingInterval as BillingInterval,
+      is_active: result.isActive,
       features: result.features ?? undefined,
       stripe_price_id: result.stripePriceId ?? undefined,
+      included_storage_gb: result.includedStorageGb,
+      included_bandwidth_gb: result.includedBandwidthGb,
+      included_invocations: result.includedInvocations,
+      included_compute_seconds: result.includedComputeSeconds,
+      trial_days: result.trialDays,
       created_at: result.createdAt.getTime(),
       updated_at: result.updatedAt.getTime(),
     };
   }
 
-  async getAllSubscriptionPlans(): Promise<SubscriptionPlan[]> {
-    const results = await this.prisma.subscriptionPlan.findMany();
+  async getSubscriptionPlanByName(name: string): Promise<SubscriptionPlan | null> {
+    const result = await this.prisma.subscriptionPlan.findUnique({ where: { name } });
+    if (!result) return null;
+    return this.serializePlan(result);
+  }
 
-    return results.map((result) => ({
-      id: result.id,
-      name: result.name as SubscriptionPlanName,
-      base_price_per_seat: result.basePricePerSeat,
-      usage_markup: result.usageMarkup,
-      features: result.features ?? undefined,
-      stripe_price_id: result.stripePriceId ?? undefined,
-      created_at: result.createdAt.getTime(),
-      updated_at: result.updatedAt.getTime(),
-    }));
+  async getAllSubscriptionPlans(): Promise<SubscriptionPlan[]> {
+    const results = await this.prisma.subscriptionPlan.findMany({
+      where: { isActive: true },
+      orderBy: { basePricePerSeat: 'asc' },
+    });
+    return results.map((r) => this.serializePlan(r));
   }
 
   async listSubscriptionPlans(): Promise<SubscriptionPlan[]> {
@@ -1335,17 +1887,21 @@ export class DatabaseService {
   async getSubscriptionPlanById(id: string): Promise<SubscriptionPlan | null> {
     const result = await this.prisma.subscriptionPlan.findUnique({ where: { id } });
     if (!result) return null;
+    return this.serializePlan(result);
+  }
 
-    return {
-      id: result.id,
-      name: result.name as SubscriptionPlanName,
-      base_price_per_seat: result.basePricePerSeat,
-      usage_markup: result.usageMarkup,
-      features: result.features ?? undefined,
-      stripe_price_id: result.stripePriceId ?? undefined,
-      created_at: result.createdAt.getTime(),
-      updated_at: result.updatedAt.getTime(),
-    };
+  /**
+   * Get the usage markup rate for an org based on their active subscription plan.
+   * Returns the plan's usageMarkup, or the global USAGE_MARGIN_RATE fallback.
+   */
+  async getUsageMarkupForOrg(orgBillingId: string): Promise<number> {
+    const sub = await this.getSubscriptionByOrgBillingId(orgBillingId);
+    if (!sub) return USAGE_MARGIN_RATE;
+
+    const plan = await this.getSubscriptionPlanById(sub.plan_id);
+    if (!plan) return USAGE_MARGIN_RATE;
+
+    return plan.usage_markup;
   }
 
   // ============================================
@@ -1518,6 +2074,34 @@ export class DatabaseService {
       created_at: result.createdAt.getTime(),
       updated_at: result.updatedAt.getTime(),
     }));
+  }
+
+  async getSubscriptionByOrgBillingId(orgBillingId: string): Promise<Subscription | null> {
+    const result = await this.prisma.subscription.findFirst({
+      where: {
+        orgBillingId,
+        status: { in: ['ACTIVE', 'TRIALING', 'PAST_DUE'] },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    if (!result) return null;
+
+    return {
+      id: result.id,
+      customer_id: result.customerId,
+      plan_id: result.planId,
+      status: result.status as SubscriptionStatus,
+      seats: result.seats,
+      stripe_subscription_id: result.stripeSubscriptionId ?? undefined,
+      current_period_start: result.currentPeriodStart.getTime(),
+      current_period_end: result.currentPeriodEnd.getTime(),
+      cancel_at: dateToTimestamp(result.cancelAt),
+      canceled_at: dateToTimestamp(result.canceledAt),
+      trial_end: dateToTimestamp(result.trialEnd),
+      created_at: result.createdAt.getTime(),
+      updated_at: result.updatedAt.getTime(),
+    };
   }
 
   // ============================================
@@ -2512,6 +3096,395 @@ export class DatabaseService {
       stripe_fee_id: result.stripeFeeId ?? undefined,
       created_at: result.createdAt.getTime(),
     }));
+  }
+
+  // ============================================
+  // USAGE WALLET METHODS (USD cents)
+  // ============================================
+
+  /**
+   * Get or create organization usage balance
+   * Creates a balance row with $0.00 if it doesn't exist
+   */
+  async getOrCreateOrgUsageBalance(orgBillingId: string): Promise<OrganizationUsageBalance> {
+    const existing = await this.prisma.organizationUsageBalance.findUnique({
+      where: { orgBillingId },
+    });
+
+    if (existing) {
+      return {
+        id: existing.id,
+        org_billing_id: existing.orgBillingId,
+        balance_cents: existing.balanceCents,
+        updated_at: existing.updatedAt.getTime(),
+        created_at: existing.createdAt.getTime(),
+      };
+    }
+
+    // Create new balance with $0.00
+    const result = await this.prisma.organizationUsageBalance.create({
+      data: {
+        orgBillingId,
+        balanceCents: 0,
+      },
+    });
+
+    return {
+      id: result.id,
+      org_billing_id: result.orgBillingId,
+      balance_cents: result.balanceCents,
+      updated_at: result.updatedAt.getTime(),
+      created_at: result.createdAt.getTime(),
+    };
+  }
+
+  /**
+   * Get organization usage balance
+   */
+  async getOrgUsageBalance(orgBillingId: string): Promise<OrganizationUsageBalance | null> {
+    const result = await this.prisma.organizationUsageBalance.findUnique({
+      where: { orgBillingId },
+    });
+
+    if (!result) return null;
+
+    return {
+      id: result.id,
+      org_billing_id: result.orgBillingId,
+      balance_cents: result.balanceCents,
+      updated_at: result.updatedAt.getTime(),
+      created_at: result.createdAt.getTime(),
+    };
+  }
+
+  /**
+   * Credit org balance idempotently (add funds)
+   * If idempotency key already exists, returns current balance (no-op)
+   * @param amountCents - Amount to add in USD cents (e.g., 2500 = $25.00)
+   */
+  async creditOrgBalanceIdempotent(args: {
+    orgBillingId: string;
+    actorUserId?: string;
+    amountCents: number;
+    reason: string;
+    idempotencyKey: string;
+    metadata?: Record<string, unknown>;
+  }): Promise<{ balanceCents: number; alreadyProcessed: boolean }> {
+    const { orgBillingId, actorUserId, amountCents, reason, idempotencyKey, metadata = {} } = args;
+
+    // Check if idempotency key already exists
+    const existingLedger = await this.prisma.organizationUsageLedger.findUnique({
+      where: { idempotencyKey },
+    });
+
+    if (existingLedger) {
+      // Already processed - return current balance
+      const balance = await this.getOrCreateOrgUsageBalance(orgBillingId);
+      return { balanceCents: balance.balance_cents, alreadyProcessed: true };
+    }
+
+    // Use transaction to ensure atomicity
+    const result = await this.prisma.$transaction(async (tx) => {
+      // Insert ledger entry
+      await tx.organizationUsageLedger.create({
+        data: {
+          orgBillingId,
+          actorUserId: actorUserId ?? null,
+          direction: 'CREDIT',
+          amountCents,
+          reason,
+          idempotencyKey,
+          metadata: metadata as object,
+        },
+      });
+
+      // Upsert balance (create if not exists, otherwise increment)
+      const updatedBalance = await tx.organizationUsageBalance.upsert({
+        where: { orgBillingId },
+        create: {
+          orgBillingId,
+          balanceCents: amountCents,
+        },
+        update: {
+          balanceCents: { increment: amountCents },
+        },
+      });
+
+      return updatedBalance.balanceCents;
+    });
+
+    return { balanceCents: result, alreadyProcessed: false };
+  }
+
+  /**
+   * Debit org balance atomically (charge for usage)
+   * Fails if insufficient balance
+   * @param amountCents - Amount to deduct in USD cents (e.g., 150 = $1.50)
+   */
+  async debitOrgBalanceAtomic(args: {
+    orgBillingId: string;
+    actorUserId?: string;
+    amountCents: number;
+    reason: string;
+    idempotencyKey: string;
+    metadata?: Record<string, unknown>;
+  }): Promise<{ balanceCents: number; alreadyProcessed: boolean }> {
+    const { orgBillingId, actorUserId, amountCents, reason, idempotencyKey, metadata = {} } = args;
+
+    // Check if idempotency key already exists
+    const existingLedger = await this.prisma.organizationUsageLedger.findUnique({
+      where: { idempotencyKey },
+    });
+
+    if (existingLedger) {
+      // Already processed - return current balance
+      const balance = await this.getOrCreateOrgUsageBalance(orgBillingId);
+      return { balanceCents: balance.balance_cents, alreadyProcessed: true };
+    }
+
+    // Use transaction to ensure atomicity with guard
+    const result = await this.prisma.$transaction(async (tx) => {
+      // Insert ledger entry first
+      await tx.organizationUsageLedger.create({
+        data: {
+          orgBillingId,
+          actorUserId: actorUserId ?? null,
+          direction: 'DEBIT',
+          amountCents,
+          reason,
+          idempotencyKey,
+          metadata: metadata as object,
+        },
+      });
+
+      // Update balance with guard (balance >= amount)
+      const updateResult = await tx.organizationUsageBalance.updateMany({
+        where: {
+          orgBillingId,
+          balanceCents: { gte: amountCents },
+        },
+        data: {
+          balanceCents: { decrement: amountCents },
+        },
+      });
+
+      if (updateResult.count === 0) {
+        // Guard failed - insufficient balance or balance row missing
+        throw new Error('INSUFFICIENT_BALANCE');
+      }
+
+      // Get updated balance
+      const updatedBalance = await tx.organizationUsageBalance.findUnique({
+        where: { orgBillingId },
+      });
+
+      return updatedBalance!.balanceCents;
+    });
+
+    return { balanceCents: result, alreadyProcessed: false };
+  }
+
+  /**
+   * Log organization usage (user-visible + internal audit)
+   * All amounts in USD
+   */
+  async logOrgUsage(args: {
+    orgBillingId: string;
+    userId?: string | null; // null for system-initiated debits (billing scheduler)
+    serviceType: string; // ai_inference, compute, storage, bandwidth, etc.
+    provider: string;
+    resource: string;
+    model?: string;
+    usdCostRaw: number; // raw provider cost
+    marginRate: number; // e.g., 0.5 = 50%
+    usdCharged: number; // final amount charged = usdCostRaw / (1 - marginRate)
+    requestId?: string;
+    metadata?: Record<string, unknown>;
+  }): Promise<{ usageId: string; costsPrivateId: string }> {
+    const {
+      orgBillingId,
+      userId,
+      serviceType,
+      provider,
+      resource,
+      model,
+      usdCostRaw,
+      marginRate,
+      usdCharged,
+      requestId,
+      metadata = {},
+    } = args;
+
+    // Calculate margin earned
+    const marginUsd = usdCharged - usdCostRaw;
+
+    // Create both records in a transaction
+    const result = await this.prisma.$transaction(async (tx) => {
+      // Resolve userId: null/undefined/'system' → null (for system-initiated debits)
+      const resolvedUserId = (userId && userId !== 'system') ? userId : null;
+
+      // User-visible usage log
+      const usage = await tx.organizationUsageLog.create({
+        data: {
+          orgBillingId,
+          userId: resolvedUserId,
+          serviceType,
+          provider,
+          resource,
+          model: model ?? null,
+          usdCostRaw,
+          marginRate,
+          usdCharged,
+          requestId: requestId ?? null,
+          metadata: metadata as object,
+        },
+      });
+
+      // Internal audit log
+      const costsPrivate = await tx.organizationUsageCostsPrivate.create({
+        data: {
+          orgBillingId,
+          userId: resolvedUserId,
+          serviceType,
+          provider,
+          resource,
+          model: model ?? null,
+          usdCostRaw,
+          usdCharged,
+          marginRate,
+          marginUsd,
+          metadata: metadata as object,
+        },
+      });
+
+      return { usageId: usage.id, costsPrivateId: costsPrivate.id };
+    });
+
+    return result;
+  }
+
+  /**
+   * Get usage ledger entries for an org with pagination
+   */
+  async getOrgUsageLedger(args: {
+    orgBillingId: string;
+    limit?: number;
+    cursor?: string;
+    direction?: UsageLedgerDirection;
+    reason?: string;
+  }): Promise<{ items: OrganizationUsageLedger[]; nextCursor?: string }> {
+    const { orgBillingId, limit = 50, cursor, direction, reason } = args;
+    const take = Math.min(limit, 200);
+
+    const where: Record<string, unknown> = { orgBillingId };
+    if (direction) where.direction = direction;
+    if (reason) where.reason = reason;
+
+    // Parse cursor if provided (format: "createdAt:id")
+    let cursorFilter: { createdAt?: { lt: Date }; id?: { lt: string } } | undefined;
+    if (cursor) {
+      const [createdAtStr, id] = cursor.split(':');
+      const createdAt = new Date(parseInt(createdAtStr, 10));
+      cursorFilter = { createdAt: { lt: createdAt }, id: { lt: id } };
+    }
+
+    const results = await this.prisma.organizationUsageLedger.findMany({
+      where: cursorFilter ? { ...where, OR: [
+        { createdAt: { lt: cursorFilter.createdAt?.lt } },
+        { createdAt: cursorFilter.createdAt?.lt, id: { lt: cursorFilter.id?.lt } },
+      ]} : where,
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      take: take + 1, // Fetch one extra to determine if there's a next page
+    });
+
+    const hasNext = results.length > take;
+    const items = hasNext ? results.slice(0, take) : results;
+
+    const mapped = items.map((r) => ({
+      id: r.id,
+      org_billing_id: r.orgBillingId,
+      actor_user_id: r.actorUserId ?? undefined,
+      direction: r.direction as UsageLedgerDirection,
+      amount_cents: r.amountCents,
+      reason: r.reason,
+      idempotency_key: r.idempotencyKey,
+      metadata: r.metadata as Record<string, unknown>,
+      created_at: r.createdAt.getTime(),
+    }));
+
+    const nextCursor = hasNext && items.length > 0
+      ? `${items[items.length - 1].createdAt.getTime()}:${items[items.length - 1].id}`
+      : undefined;
+
+    return { items: mapped, nextCursor };
+  }
+
+  /**
+   * Get usage log entries for an org with pagination and date filtering
+   */
+  async getOrgUsageLog(args: {
+    orgBillingId: string;
+    serviceType?: string;
+    periodStart?: number;
+    periodEnd?: number;
+    limit?: number;
+    offset?: number;
+  }): Promise<{ items: OrganizationUsageLog[]; summary: { usdCharged: number; usdCostRaw: number } }> {
+    const { orgBillingId, serviceType, periodStart, periodEnd, limit = 50, offset = 0 } = args;
+
+    // Default to last 30 days if not specified
+    const now = Date.now();
+    const start = periodStart ?? now - 30 * 24 * 60 * 60 * 1000;
+    const end = periodEnd ?? now;
+
+    const where: Record<string, unknown> = {
+      orgBillingId,
+      createdAt: {
+        gte: new Date(start),
+        lte: new Date(end),
+      },
+    };
+    if (serviceType) where.serviceType = serviceType;
+
+    const [results, aggregation] = await Promise.all([
+      this.prisma.organizationUsageLog.findMany({
+        where,
+        orderBy: { createdAt: 'desc' },
+        take: Math.min(limit, 200),
+        skip: offset,
+      }),
+      this.prisma.organizationUsageLog.aggregate({
+        where,
+        _sum: {
+          usdCharged: true,
+          usdCostRaw: true,
+        },
+      }),
+    ]);
+
+    const items = results.map((r) => ({
+      id: r.id,
+      org_billing_id: r.orgBillingId,
+      user_id: r.userId,
+      service_type: r.serviceType,
+      provider: r.provider,
+      resource: r.resource,
+      model: r.model ?? undefined,
+      usd_cost_raw: r.usdCostRaw,
+      margin_rate: r.marginRate,
+      usd_charged: r.usdCharged,
+      request_id: r.requestId ?? undefined,
+      metadata: r.metadata as Record<string, unknown>,
+      created_at: r.createdAt.getTime(),
+    }));
+
+    return {
+      items,
+      summary: {
+        usdCharged: aggregation._sum.usdCharged ?? 0,
+        usdCostRaw: aggregation._sum.usdCostRaw ?? 0,
+      },
+    };
   }
 }
 

@@ -1,7 +1,7 @@
 import { z } from 'zod';
 
-// Email validation
-export const emailSchema = z.string().email('Invalid email address');
+// Email validation — always normalize to lowercase for case-insensitive uniqueness
+export const emailSchema = z.string().email('Invalid email address').transform((e) => e.toLowerCase());
 
 // Phone validation (E.164 format)
 export const phoneSchema = z.string().regex(

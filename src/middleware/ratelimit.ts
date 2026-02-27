@@ -7,7 +7,15 @@ interface RateLimitStore {
   };
 }
 
-// In-memory store (replace with Redis in production)
+// In-memory store — rate limits are NOT shared across instances.
+// In a multi-instance deployment, each process tracks limits independently.
+// TODO: Replace with Redis-backed store for production multi-instance deployments.
+if (process.env.NODE_ENV === 'production' && !process.env.REDIS_URL) {
+  console.warn(
+    '⚠️  Rate limiting is in-memory only. In a multi-instance deployment, ' +
+    'limits will not be shared. Set REDIS_URL to enable distributed rate limiting.'
+  );
+}
 const store: RateLimitStore = {};
 
 export interface RateLimitConfig {

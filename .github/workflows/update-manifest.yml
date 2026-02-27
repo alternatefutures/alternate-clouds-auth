@@ -1,0 +1,254 @@
+name: Update Auth Manifest (No Redeploy)
+permissions:
+  contents: read
+
+# Sends a manifest update to the existing auth deployment on Akash.
+# Keeps the same DSEQ and ingress URL — NO DNS changes required.
+# Use this for code-only updates (new Docker image after push to main).
+#
+# For changes requiring new resources (CPU/RAM/storage), use deploy-akash.yml instead.
+
+on:
+  # Auto-trigger after successful Docker image build+push
+  workflow_run:
+    workflows: ["Build and Publish Docker Image"]
+    types:
+      - completed
+    branches: [main]
+
+  workflow_dispatch:
+
+# NOTE: After the initial full redeploy, update these values with the new DSEQ and provider.
+# These are placeholders that MUST be set after step 5 of the redeployment.
+env:
+  # The DSEQ and provider will be set after the full redeploy.
+  # Update these after running the full deploy-akash.yml workflow.
+  AUTH_DSEQ: "25474440"
+  AUTH_PROVIDER: "akash1xmjzu9dczlg9fa4v3pfvwzn7ty89r003laj4ac"
+
+concurrency:
+  group: akash-auth-manifest-update
+  cancel-in-progress: false
+
+jobs:
+  update-manifest:
+    runs-on: ubuntu-latest
+    environment: production
+    # Skip if triggered by workflow_run and the build failed
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
+
+    steps:
+      - name: Checkout service-auth
+        uses: actions/checkout@v4
+
+      - name: Validate DSEQ is configured
+        run: |
+          if [ "${{ env.AUTH_DSEQ }}" == "UPDATE_AFTER_REDEPLOY" ]; then
+            echo "::error::AUTH_DSEQ has not been updated after the full redeploy."
+            echo "Update the env vars in this workflow file with the new DSEQ and provider."
+            exit 1
+          fi
+
+      - name: Install Akash CLI and provider-services
+        run: |
+          # Install akash CLI (latest compatible with mainnet)
+          curl -sSfL https://raw.githubusercontent.com/akash-network/node/master/install.sh | sh -s -- -b /usr/local/bin
+          akash version
+
+          # Install provider-services CLI (latest release)
+          PROVIDER_VERSION=$(curl -s https://api.github.com/repos/akash-network/provider/releases/latest | jq -r '.tag_name')
+          echo "Installing provider-services ${PROVIDER_VERSION}"
+          curl -sSfL "https://github.com/akash-network/provider/releases/download/${PROVIDER_VERSION}/provider-services_linux_amd64.zip" -o /tmp/provider.zip
+          unzip -o /tmp/provider.zip -d /usr/local/bin/
+          chmod +x /usr/local/bin/provider-services
+
+      - name: Setup Akash wallet
+        env:
+          AKASH_MNEMONIC: ${{ secrets.AKASH_MNEMONIC }}
+        run: |
+          mkdir -p "$HOME/.akash"
+          echo "$AKASH_MNEMONIC" | akash keys add deploy --recover --keyring-backend test --home "$HOME/.akash"
+          AKASH_ADDRESS=$(akash keys show deploy -a --keyring-backend test --home "$HOME/.akash")
+          echo "AKASH_ADDRESS=$AKASH_ADDRESS" >> $GITHUB_ENV
+
+      - name: Setup certificates
+        env:
+          AKASH_NODE: https://rpc.akashnet.net:443
+          AKASH_CHAIN_ID: akashnet-2
+        run: |
+          echo "Generating fresh certificate..."
+          akash tx cert generate client \
+            --from deploy \
+            --keyring-backend test \
+            --home "$HOME/.akash"
+
+          if [ -n "${AKASH_ADDRESS:-}" ] && [ -f "$HOME/.akash/$AKASH_ADDRESS.pem" ]; then
+            echo "Certificate file generated at $HOME/.akash/$AKASH_ADDRESS.pem"
+          else
+            echo "Certificate file check skipped (address not in env yet) or not found."
+            ls -la "$HOME/.akash" || true
+          fi
+
+          echo "Publishing certificate to chain..."
+          akash tx cert publish client \
+            --from deploy \
+            --keyring-backend test \
+            --home "$HOME/.akash" \
+            --node $AKASH_NODE \
+            --chain-id $AKASH_CHAIN_ID \
+            --gas-prices 0.025uakt \
+            --gas auto \
+            --gas-adjustment 1.5 \
+            -y || echo "Certificate may already be published"
+
+          sleep 10
+          echo "Certificate setup complete"
+
+      - name: Prepare auth SDL
+        run: |
+          # Use latest image from main branch
+          SHORT_SHA="${GITHUB_SHA::7}"
+          IMAGE_TAG="main-${SHORT_SHA}"
+          echo "Using image tag: $IMAGE_TAG"
+
+          # Generate the same SDL structure used by deploy-akash.yml
+          # The profiles/placement/deployment sections MUST match the on-chain deployment
+          cat > deploy-final.yaml << EOF
+          ---
+          version: "2.0"
+
+          services:
+            auth-api:
+              image: ghcr.io/alternatefutures/service-auth:${IMAGE_TAG}
+              credentials:
+                host: ghcr.io
+                username: alternatefutures
+                password: "${{ secrets.GHCR_PAT }}"
+              expose:
+                - port: 3000
+                  as: 80
+                  to:
+                    - global: true
+                  accept:
+                    - auth.alternatefutures.ai
+              env:
+                - NODE_ENV=production
+                - PORT=3000
+                - DATABASE_URL=${{ secrets.AUTH_DATABASE_URL }}
+                - JWT_EXPIRES_IN=15m
+                - JWT_REFRESH_EXPIRES_IN=7d
+                - DOMAIN=alternatefutures.ai
+                - APP_URL=https://auth.alternatefutures.ai
+                - FRONTEND_URL=https://app.alternatefutures.ai
+                - CORS_ORIGIN=https://app.alternatefutures.ai
+                - GOOGLE_REDIRECT_URI=https://auth.alternatefutures.ai/auth/oauth/callback/google
+                - GITHUB_REDIRECT_URI=https://auth.alternatefutures.ai/auth/oauth/callback/github
+                - TWITTER_REDIRECT_URI=https://auth.alternatefutures.ai/auth/oauth/callback/twitter
+                - DISCORD_REDIRECT_URI=https://auth.alternatefutures.ai/auth/oauth/callback/discord
+                - INFISICAL_SITE_URL=https://ddchr1pel5e0p8i0c46drjpclg.ingress.europlots.com
+                - INFISICAL_CLIENT_ID=${{ secrets.INFISICAL_CLIENT_ID }}
+                - INFISICAL_CLIENT_SECRET=${{ secrets.INFISICAL_CLIENT_SECRET }}
+                - INFISICAL_PROJECT_ID=${{ secrets.INFISICAL_PROJECT_ID }}
+                - INFISICAL_GLOBAL_PROJECT_ID=${{ secrets.INFISICAL_GLOBAL_PROJECT_ID }}
+                - INFISICAL_ENVIRONMENT=prod
+                - RESEND_API_KEY=${{ secrets.RESEND_API_KEY }}
+
+          profiles:
+            compute:
+              auth-api:
+                resources:
+                  cpu:
+                    units: 1.0
+                  memory:
+                    size: 1Gi
+                  storage:
+                    - size: 1Gi
+
+            placement:
+              akash:
+                attributes:
+                  host: akash
+                signedBy:
+                  anyOf:
+                    - "akash1365yvmc4s7awdyj3n2sav7xfx76adc6dnmlx63"
+                pricing:
+                  auth-api:
+                    denom: uakt
+                    amount: 100
+
+          deployment:
+            auth-api:
+              akash:
+                profile: auth-api
+                count: 1
+          EOF
+
+          echo "Auth SDL prepared:"
+          cat deploy-final.yaml
+
+      - name: Update deployment on-chain
+        env:
+          AKASH_NODE: https://rpc.akashnet.net:443
+          AKASH_CHAIN_ID: akashnet-2
+        run: |
+          echo "=== Updating Auth Deployment On-Chain ==="
+          echo "DSEQ:     ${{ env.AUTH_DSEQ }}"
+
+          akash tx deployment update deploy-final.yaml \
+            --dseq ${{ env.AUTH_DSEQ }} \
+            --from deploy \
+            --keyring-backend test \
+            --home "$HOME/.akash" \
+            --node $AKASH_NODE \
+            --chain-id $AKASH_CHAIN_ID \
+            --gas-prices 0.025uakt \
+            --gas auto \
+            --gas-adjustment 1.5 \
+            -y
+
+          echo "On-chain deployment updated. Waiting for confirmation..."
+          sleep 10
+
+      - name: Send manifest to provider
+        env:
+          AKASH_NODE: https://rpc.akashnet.net:443
+          AKASH_CHAIN_ID: akashnet-2
+          AKASH_KEYRING_BACKEND: test
+          AKASH_KEY_NAME: deploy
+          AKASH_FROM: deploy
+        run: |
+          echo "=== Sending Auth Manifest Update ==="
+          echo "DSEQ:     ${{ env.AUTH_DSEQ }}"
+          echo "Provider: ${{ env.AUTH_PROVIDER }}"
+
+          provider-services send-manifest deploy-final.yaml \
+            --dseq ${{ env.AUTH_DSEQ }} \
+            --provider ${{ env.AUTH_PROVIDER }} \
+            --from deploy \
+            --keyring-backend test \
+            --node $AKASH_NODE \
+            --home $HOME/.akash
+
+          echo "Manifest sent successfully!"
+
+      - name: Health check
+        continue-on-error: true
+        run: |
+          echo "Waiting 30s for container update..."
+          sleep 30
+          curl -sf --max-time 30 https://auth.alternatefutures.ai/health || echo "Health check pending"
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "## Auth Manifest Update" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| **DSEQ** | ${{ env.AUTH_DSEQ }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Provider** | ${{ env.AUTH_PROVIDER }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Trigger** | ${{ github.event_name }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Same DSEQ, same ingress URL — no DNS update required." >> $GITHUB_STEP_SUMMARY
