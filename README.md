@@ -1,6 +1,8 @@
 # Alternate Futures Authentication Service
 
-Multi-method authentication system supporting email, SMS, Web3 wallets, and social OAuth providers. Also handles billing, subscriptions, credits wallet, AI inference proxy, and organization management.
+[![Tests](https://github.com/alternatefutures/service-auth/actions/workflows/test.yml/badge.svg)](https://github.com/alternatefutures/service-auth/actions/workflows/test.yml)
+
+Multi-method authentication system supporting email, SMS, Web3 wallets, and social OAuth providers.
 
 ## Features
 

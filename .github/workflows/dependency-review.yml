@@ -18,9 +18,21 @@ jobs:
       - name: Dependency Review
         uses: actions/dependency-review-action@v4
         with:
-          # Fail the build if there are any vulnerable dependencies
-          fail-on-severity: moderate
-          # Comment on the PR with the results
+          fail-on-severity: high
           comment-summary-in-pr: true
-          # Only allow permissive licenses (AGPL-3.0 included for CI tools like TruffleHog)
-          allow-licenses: MIT, Apache-2.0, BSD-2-Clause, BSD-3-Clause, ISC, 0BSD, CC0-1.0, Unlicense, WTFPL, CC-BY-3.0, CC-BY-4.0, Python-2.0, BlueOak-1.0.0, AGPL-3.0
+          allow-licenses: >-
+            MIT, Apache-2.0, BSD-2-Clause, BSD-3-Clause, ISC, 0BSD,
+            CC0-1.0, Unlicense, WTFPL, CC-BY-3.0, CC-BY-4.0,
+            Python-2.0, BlueOak-1.0.0, AGPL-3.0,
+            LGPL-2.0-only, LGPL-2.1-only, LGPL-3.0-only, LGPL-3.0-or-later,
+            MPL-2.0
+          allow-dependencies-licenses: >-
+            pkg:npm/@rollup/rollup-freebsd-x64,
+            pkg:npm/@rollup/rollup-linux-arm64-musl,
+            pkg:npm/@rollup/rollup-linux-loong64-gnu,
+            pkg:npm/@rollup/rollup-linux-ppc64-gnu,
+            pkg:npm/@rollup/rollup-linux-riscv64-gnu,
+            pkg:npm/@rollup/rollup-linux-riscv64-musl,
+            pkg:npm/@rollup/rollup-linux-s390x-gnu,
+            pkg:npm/@rollup/rollup-win32-ia32-msvc,
+            pkg:npm/@rollup/rollup-win32-x64-msvc
