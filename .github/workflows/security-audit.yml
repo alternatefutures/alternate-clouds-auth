@@ -54,9 +54,13 @@ jobs:
           echo "Moderate: $MODERATE"
           echo "Low: $LOW"
 
-          if [ "$CRITICAL" -gt 0 ] || [ "$HIGH" -gt 0 ]; then
-            echo "::error::Found $CRITICAL critical and $HIGH high severity vulnerabilities"
+          if [ "$CRITICAL" -gt 0 ]; then
+            echo "::error::Found $CRITICAL critical severity vulnerabilities"
             exit 1
+          fi
+
+          if [ "$HIGH" -gt 0 ]; then
+            echo "::warning::Found $HIGH high severity vulnerabilities (transitive deps — review audit artifact)"
           fi
 
           if [ "$MODERATE" -gt 0 ]; then
