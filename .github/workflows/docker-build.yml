@@ -53,6 +53,35 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
 
+      - name: Set up kubectl
+        if: github.ref == 'refs/heads/main'
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBECONFIG_B64 }}" | base64 -d > ~/.kube/config
+          chmod 600 ~/.kube/config
+
+      - name: Deploy to K3s
+        if: github.ref == 'refs/heads/main'
+        run: |
+          kubectl set image deployment/service-auth \
+            service-auth=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest \
+            -n af-production
+          kubectl rollout status deployment/service-auth \
+            -n af-production --timeout=120s
+
+      - name: Run Prisma migrations
+        if: github.ref == 'refs/heads/main'
+        run: |
+          kubectl exec deployment/service-auth -n af-production -- prisma migrate deploy
+
+      - name: Verify deployment
+        if: github.ref == 'refs/heads/main'
+        run: |
+          kubectl get pods -n af-production -l app=service-auth
+          echo "---"
+          sleep 10
+          curl -sf --max-time 10 https://auth.alternatefutures.ai/health && echo "Auth healthy" || echo "::warning::Health check did not pass yet"
+
       - name: Summary
         run: |
           echo "## Docker Image Published" >> $GITHUB_STEP_SUMMARY

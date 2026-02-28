@@ -20,6 +20,9 @@ RUN pnpm prune --prod
 
 RUN pnpm exec prisma generate
 
+# Install prisma CLI globally (needed for kubectl exec prisma migrate deploy)
+RUN npm install -g prisma@6
+
 EXPOSE 3000
 
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \

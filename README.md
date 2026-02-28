@@ -64,8 +64,8 @@ npm install
 # Set up environment variables
 cp .env.example .env
 
-# Push database schema
-npx prisma db push
+# Apply database migrations
+npx prisma migrate dev
 
 # Run development server
 npm run dev
