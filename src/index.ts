@@ -1,6 +1,12 @@
 import { config as dotenvConfig } from 'dotenv';
-dotenvConfig({ path: '.env.local' });
-dotenvConfig();
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const __filename = fileURLToPath(import.meta.url);
+const serviceRoot = path.resolve(path.dirname(__filename), '..');
+
+dotenvConfig({ path: path.join(serviceRoot, '.env') });
+dotenvConfig({ path: path.join(serviceRoot, '.env.local'), override: true });
 import { Hono } from 'hono';
 import { logger } from 'hono/logger';
 import { corsMiddleware, devCorsMiddleware } from './middleware/cors';
@@ -13,6 +19,7 @@ import tokensRoutes from './routes/tokens';
 import billingRoutes from './routes/billing';
 import organizationsRoutes from './routes/organizations';
 import aiRoutes from './routes/ai';
+import v1Routes from './routes/ai/v1';
 
 // Initialize secrets before anything else
 await secretsService.initialize();
@@ -179,6 +186,10 @@ app.route('/organizations', organizationsRoutes);
 
 // Mount AI inference proxy routes
 app.route('/ai', aiRoutes);
+
+// Mount unified OpenAI-compatible endpoint at top level for SDK compatibility
+// Usage: OpenAI(api_key="af_live_xxx", base_url="https://auth.alternatefutures.ai/v1")
+app.route('/v1', v1Routes);
 
 // 404 handler
 app.notFound((c) => {

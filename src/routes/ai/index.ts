@@ -16,6 +16,7 @@ import xaiRoutes from './xai';
 import worldlabsRoutes from './worldlabs';
 import elevenlabsRoutes from './elevenlabs';
 import falaiRoutes from './fal-ai';
+import v1Routes from './v1';
 
 const app = new Hono();
 
@@ -38,5 +39,6 @@ app.route('/xai', xaiRoutes);
 app.route('/worldlabs', worldlabsRoutes);
 app.route('/elevenlabs', elevenlabsRoutes);
 app.route('/fal-ai', falaiRoutes);
+app.route('/v1', v1Routes);
 
 export default app;
