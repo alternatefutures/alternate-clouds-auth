@@ -18,8 +18,6 @@ RUN rm -rf dist && pnpm exec esbuild src/index.ts --bundle --platform=node --tar
 
 RUN pnpm prune --prod --ignore-scripts
 
-RUN pnpm exec prisma generate
-
 # Install prisma CLI globally (needed for kubectl exec prisma migrate deploy)
 RUN npm install -g prisma@6
 
