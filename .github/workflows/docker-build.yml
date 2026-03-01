@@ -65,19 +65,19 @@ jobs:
         run: |
           kubectl set image deployment/service-auth \
             service-auth=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest \
-            -n af-production
+            -n af-production --insecure-skip-tls-verify
           kubectl rollout status deployment/service-auth \
-            -n af-production --timeout=120s
+            -n af-production --timeout=120s --insecure-skip-tls-verify
 
       - name: Run Prisma migrations
         if: github.ref == 'refs/heads/main'
         run: |
-          kubectl exec deployment/service-auth -n af-production -- prisma migrate deploy
+          kubectl exec deployment/service-auth -n af-production --insecure-skip-tls-verify -- prisma migrate deploy
 
       - name: Verify deployment
         if: github.ref == 'refs/heads/main'
         run: |
-          kubectl get pods -n af-production -l app=service-auth
+          kubectl get pods -n af-production -l app=service-auth --insecure-skip-tls-verify
           echo "---"
           sleep 10
           curl -sf --max-time 10 https://auth.alternatefutures.ai/health && echo "Auth healthy" || echo "::warning::Health check did not pass yet"
