@@ -1,4 +1,6 @@
-import 'dotenv/config';
+import { config as dotenvConfig } from 'dotenv';
+dotenvConfig({ path: '.env.local' });
+dotenvConfig();
 import { Hono } from 'hono';
 import { logger } from 'hono/logger';
 import { corsMiddleware, devCorsMiddleware } from './middleware/cors';
