@@ -72,7 +72,7 @@ jobs:
       - name: Run Prisma migrations
         if: github.ref == 'refs/heads/main'
         run: |
-          kubectl exec deployment/service-auth -n af-production --insecure-skip-tls-verify -- prisma migrate deploy
+          kubectl exec deployment/service-auth -n af-production --insecure-skip-tls-verify -- npx prisma migrate deploy
 
       - name: Verify deployment
         if: github.ref == 'refs/heads/main'
