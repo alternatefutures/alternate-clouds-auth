@@ -16,7 +16,7 @@ COPY . .
 # @prisma/client is external since it's dynamically linked
 RUN rm -rf dist && pnpm exec esbuild src/index.ts --bundle --platform=node --target=node20 --outfile=dist/index.js --format=esm --packages=external
 
-RUN pnpm prune --prod
+RUN pnpm prune --prod --ignore-scripts
 
 RUN pnpm exec prisma generate
 
