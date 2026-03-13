@@ -14,7 +14,7 @@
     "db:push": "prisma db push",
     "db:migrate": "prisma migrate dev",
     "db:migrate:deploy": "prisma migrate deploy",
-    "db:studio": "prisma studio --port 1610",
+    "db:studio": "BROWSER=none prisma studio --port 1610",
     "db:seed": "tsx scripts/seed-plans.ts",
     "test": "vitest run",
     "test:watch": "vitest",
