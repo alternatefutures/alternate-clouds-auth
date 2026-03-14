@@ -7,6 +7,7 @@ import { jwtService } from '../../services/jwt.service';
 import { generateOTP } from '../../utils/otp';
 import { smsAuthRequestSchema, smsAuthVerifySchema } from '../../utils/validators';
 import { strictRateLimit } from '../../middleware/ratelimit';
+import { timingSafeCompare } from '../../utils/crypto';
 
 const app = new Hono();
 
@@ -83,8 +84,8 @@ app.post('/verify', strictRateLimit, async (c) => {
       return c.json({ error: 'Maximum verification attempts exceeded' }, 429);
     }
 
-    // Check if code matches
-    if (verificationCode.code !== code) {
+    // Fixed by audit 2026-03: timing-safe OTP comparison (was !== operator)
+    if (!timingSafeCompare(verificationCode.code, code)) {
       // Increment attempts
       await dbService.incrementVerificationAttempts(verificationCode.id);
       return c.json({ error: 'Invalid verification code' }, 400);

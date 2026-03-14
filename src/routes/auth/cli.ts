@@ -7,7 +7,7 @@ import { dbService } from '../../services/db.service';
 import { TokenService } from '../../services/token.service';
 import { authMiddleware, requireAuthUser } from '../../middleware/auth';
 import { standardRateLimit } from '../../middleware/ratelimit';
-import { encryptForStorage, decryptFromStorage, verifyTokenHash } from '../../utils/crypto';
+import { encryptForStorage, decryptFromStorage, verifyTokenHash, timingSafeCompare } from '../../utils/crypto';
 
 const app = new Hono();
 const tokenService = new TokenService(dbService);
@@ -176,7 +176,8 @@ app.post('/cli/poll', standardRateLimit, async (c) => {
     return c.json({ error: 'Corrupted session' }, 400);
   }
 
-  if (hashSecret(pollSecret) !== payload.pollSecretHash) {
+  // Fixed by audit 2026-03: timing-safe hash comparison (was !== operator)
+  if (!timingSafeCompare(hashSecret(pollSecret), payload.pollSecretHash)) {
     // Avoid leaking whether token exists for wrong secret
     return c.json({ error: 'Invalid session secret' }, 401);
   }

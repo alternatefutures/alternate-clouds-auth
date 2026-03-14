@@ -16,6 +16,7 @@ import { Hono } from 'hono';
 import { z } from 'zod';
 import { dbService } from '../../services/db.service';
 import { EmailService } from '../../services/email.service';
+import { timingSafeCompare } from '../../utils/crypto';
 
 const app = new Hono();
 
@@ -41,7 +42,8 @@ app.use('*', async (c, next) => {
   }
 
   const provided = c.req.header('x-af-introspection-secret');
-  if (!provided || provided !== secret) {
+  // Fixed by audit 2026-03: timing-safe secret comparison (was !== operator)
+  if (!provided || !timingSafeCompare(provided, secret)) {
     return c.json({ error: 'Unauthorized' }, 401);
   }
 

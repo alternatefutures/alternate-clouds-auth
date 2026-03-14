@@ -38,9 +38,6 @@
   "dependencies": {
     "@hono/node-server": "^1.19.5",
     "@infisical/sdk": "^2.3.4",
-    "@noble/curves": "^2.0.1",
-    "@noble/hashes": "^2.0.1",
-    "@noble/secp256k1": "^3.0.0",
     "@prisma/client": "^6.1.0",
     "dotenv": "^17.2.3",
     "ethers": "^6.13.0",

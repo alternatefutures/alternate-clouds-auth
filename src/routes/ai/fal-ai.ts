@@ -135,6 +135,9 @@ async function handleFalRequest(c: any, modelId: string): Promise<Response> {
 
   const usdCostRaw = calculateFalCost(modelId, requestBody);
 
+  // Fixed by audit 2026-03: parse JSON once before try/catch to avoid double .json() on consumed body
+  const responseBody = await upstreamResponse.json();
+
   try {
     const result = await processUsage({
       orgBillingId: billing.orgBillingId,
@@ -146,7 +149,6 @@ async function handleFalRequest(c: any, modelId: string): Promise<Response> {
       usdCostRaw,
     });
 
-    const responseBody = await upstreamResponse.json();
     return c.json(responseBody, 200, {
       'x-af-balance-cents': result.newBalanceCents.toString(),
     });
@@ -154,7 +156,6 @@ async function handleFalRequest(c: any, modelId: string): Promise<Response> {
     console.error('Error processing usage:', error);
   }
 
-  const responseBody = await upstreamResponse.json();
   return c.json(responseBody, 200, {
     'x-af-balance-cents': balanceCheck.balanceCents.toString(),
   });
