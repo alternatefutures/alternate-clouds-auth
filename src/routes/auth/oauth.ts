@@ -5,6 +5,7 @@ import { dbService } from '../../services/db.service';
 import { jwtService } from '../../services/jwt.service';
 import { standardRateLimit } from '../../middleware/ratelimit';
 import { encryptForStorage, generateCodeVerifier, generateCodeChallenge } from '../../utils/crypto';
+import { whitelistService } from '../../services/whitelist.service';
 
 const app = new Hono();
 
@@ -174,6 +175,11 @@ app.get('/callback/:provider', async (c) => {
     if (oauthUserInfo.email) {
       oauthUserInfo.email = oauthUserInfo.email.toLowerCase();
     }
+
+    // Whitelist gate — check email from OAuth provider
+    const wlIdentifier = oauthUserInfo.email || `${provider}:${oauthUserInfo.id}`;
+    const wl = await whitelistService.check403(wlIdentifier);
+    if (wl) return c.json(wl.body, wl.status);
 
     // Check if user exists with this OAuth provider
     const identifier = `${provider}:${oauthUserInfo.id}`;

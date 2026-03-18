@@ -8,6 +8,7 @@ import { generateOTP } from '../../utils/otp';
 import { smsAuthRequestSchema, smsAuthVerifySchema } from '../../utils/validators';
 import { strictRateLimit } from '../../middleware/ratelimit';
 import { timingSafeCompare } from '../../utils/crypto';
+import { whitelistService } from '../../services/whitelist.service';
 
 const app = new Hono();
 
@@ -98,6 +99,10 @@ app.post('/verify', strictRateLimit, async (c) => {
 
     // Mark code as verified
     await dbService.markVerificationCodeAsUsed(verificationCode.id);
+
+    // Whitelist gate
+    const wl = await whitelistService.check403(phone);
+    if (wl) return c.json(wl.body, wl.status);
 
     // Check if user exists with this phone number
     let user = await dbService.getUserByPhone(phone);

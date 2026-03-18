@@ -11,6 +11,20 @@ datasource db {
 }
 
 // ============================================
+// ACCESS CONTROL
+// ============================================
+
+model AuthWhitelist {
+  id             String   @id @default(uuid())
+  identifier     String   @unique // email, phone, or wallet address (stored lowercase)
+  identifierType String   @map("identifier_type") // email | phone | wallet
+  note           String?
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  @@map("auth_whitelist")
+}
+
+// ============================================
 // AUTH CORE MODELS
 // ============================================
 

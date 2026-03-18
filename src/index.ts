@@ -20,6 +20,7 @@ import billingRoutes from './routes/billing';
 import organizationsRoutes from './routes/organizations';
 import aiRoutes from './routes/ai';
 import v1Routes from './routes/ai/v1';
+import whitelistRoutes from './routes/admin/whitelist';
 
 // Initialize secrets before anything else
 await secretsService.initialize();
@@ -183,6 +184,9 @@ app.route('/billing', billingRoutes);
 
 // Mount organizations routes
 app.route('/organizations', organizationsRoutes);
+
+// Mount admin routes (protected by introspection secret)
+app.route('/admin/whitelist', whitelistRoutes);
 
 // Mount AI inference proxy routes
 app.route('/ai', aiRoutes);

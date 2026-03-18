@@ -6,6 +6,7 @@ import { siweService } from '../../services/siwe.service';
 import { generateNonce } from '../../utils/otp';
 import { walletChallengeRequestSchema, walletVerifySchema, validateSolanaAddress } from '../../utils/validators';
 import { strictRateLimit } from '../../middleware/ratelimit';
+import { whitelistService } from '../../services/whitelist.service';
 
 const app = new Hono();
 
@@ -125,6 +126,10 @@ app.post('/verify', strictRateLimit, async (c) => {
 
     // Mark challenge as verified
     await dbService.verifySIWEChallenge(challenge.id);
+
+    // Whitelist gate
+    const wl = await whitelistService.check403(address);
+    if (wl) return c.json(wl.body, wl.status);
 
     // Check if user exists with this wallet
     let authMethod = await dbService.getAuthMethodByIdentifier(address.toLowerCase(), 'wallet');

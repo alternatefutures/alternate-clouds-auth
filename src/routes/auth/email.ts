@@ -8,6 +8,7 @@ import { generateOTP } from '../../utils/otp';
 import { emailAuthRequestSchema, emailAuthVerifySchema } from '../../utils/validators';
 import { timingSafeCompare } from '../../utils/crypto';
 import { strictRateLimit } from '../../middleware/ratelimit';
+import { whitelistService } from '../../services/whitelist.service';
 
 const app = new Hono();
 
@@ -20,6 +21,10 @@ app.post('/request', strictRateLimit, async (c) => {
     // Validate request body
     const body = await c.req.json();
     const { email } = emailAuthRequestSchema.parse(body);
+
+    // Whitelist gate — reject before sending OTP to save the email and user's time
+    const wl = await whitelistService.check403(email);
+    if (wl) return c.json(wl.body, wl.status);
 
     // Generate OTP code
     const code = generateOTP(6);
@@ -97,6 +102,10 @@ app.post('/verify', strictRateLimit, async (c) => {
 
     // Mark code as used
     await dbService.markVerificationCodeAsUsed(verificationCode.id);
+
+    // Whitelist gate — blocks non-whitelisted users before any user creation or token issuance
+    const wl = await whitelistService.check403(email);
+    if (wl) return c.json(wl.body, wl.status);
 
     // Check if user exists
     let user = await dbService.getUserByEmail(email);
