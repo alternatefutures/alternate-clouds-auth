@@ -1,6 +1,9 @@
 import { PrismaClient } from '@prisma/client';
+import Stripe from 'stripe';
 
 const prisma = new PrismaClient();
+
+const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY || '';
 
 /**
  * Alternate Futures subscription plans (2026-02-14)
@@ -18,48 +21,100 @@ const prisma = new PrismaClient();
 const subscriptionPlans = [
   {
     name: 'MONTHLY',
-    basePricePerSeat: 2500, // $25/month in cents
-    usageMarkup: 0.25, // 25% markup on usage
+    basePricePerSeat: 2500,
+    usageMarkup: 0.25,
     billingInterval: 'MONTHLY',
     isActive: true,
     trialDays: 30,
-    features: JSON.stringify([
-      'Full platform access',
-      'AI inference (usage-based)',
-      'Akash deployments',
-      'Phala TEE deployments',
-      'Custom domains',
-      'Team collaboration',
-      'Priority support',
-    ]),
+    features: JSON.stringify([]),
+    stripe: {
+      productName: 'Alternate Futures Monthly',
+      unitAmount: 2500,
+      interval: 'month' as const,
+    },
   },
   {
     name: 'YEARLY',
-    basePricePerSeat: 2000, // $20/month equivalent ($240/year) in cents
-    usageMarkup: 0.20, // 20% markup on usage
+    basePricePerSeat: 2000,
+    usageMarkup: 0.20,
     billingInterval: 'YEARLY',
     isActive: true,
     trialDays: 30,
-    features: JSON.stringify([
-      'Full platform access',
-      'AI inference (usage-based)',
-      'Akash deployments',
-      'Phala TEE deployments',
-      'Custom domains',
-      'Team collaboration',
-      'Priority support',
-      'Save 20% vs monthly',
-    ]),
+    features: JSON.stringify([]),
+    stripe: {
+      productName: 'Alternate Futures Yearly',
+      unitAmount: 24000, // $240/year
+      interval: 'year' as const,
+    },
   },
 ];
 
-// Legacy plan names to deactivate
 const LEGACY_PLANS = ['FREE', 'STARTER', 'PRO', 'ENTERPRISE'];
+
+/**
+ * Create or retrieve a Stripe Product + Price for a plan.
+ * Returns the Stripe Price ID, or null if Stripe is not configured.
+ */
+async function ensureStripePrice(plan: typeof subscriptionPlans[0]): Promise<string | null> {
+  if (!STRIPE_SECRET_KEY) {
+    console.log(`  [Stripe] No STRIPE_SECRET_KEY — skipping Stripe price creation for ${plan.name}`);
+    return null;
+  }
+
+  const stripe = new Stripe(STRIPE_SECRET_KEY);
+  const { stripe: s } = plan;
+
+  // Search for existing product by metadata
+  const products = await stripe.products.search({
+    query: `metadata["af_plan"]:"${plan.name}"`,
+  });
+
+  let productId: string;
+
+  if (products.data.length > 0) {
+    productId = products.data[0].id;
+    console.log(`  [Stripe] Found existing product for ${plan.name}: ${productId}`);
+  } else {
+    const product = await stripe.products.create({
+      name: s.productName,
+      metadata: { af_plan: plan.name },
+    });
+    productId = product.id;
+    console.log(`  [Stripe] Created product for ${plan.name}: ${productId}`);
+  }
+
+  // Search for existing price on this product
+  const prices = await stripe.prices.list({
+    product: productId,
+    active: true,
+    type: 'recurring',
+    limit: 10,
+  });
+
+  const matchingPrice = prices.data.find(
+    p => p.unit_amount === s.unitAmount && p.recurring?.interval === s.interval
+  );
+
+  if (matchingPrice) {
+    console.log(`  [Stripe] Found existing price for ${plan.name}: ${matchingPrice.id}`);
+    return matchingPrice.id;
+  }
+
+  const price = await stripe.prices.create({
+    product: productId,
+    unit_amount: s.unitAmount,
+    currency: 'usd',
+    recurring: { interval: s.interval },
+    metadata: { af_plan: plan.name },
+  });
+
+  console.log(`  [Stripe] Created price for ${plan.name}: ${price.id}`);
+  return price.id;
+}
 
 async function seed() {
   console.log('Seeding subscription plans...\n');
 
-  // Deactivate legacy plans (don't delete — they may have FK references)
   for (const legacyName of LEGACY_PLANS) {
     const existing = await prisma.subscriptionPlan.findUnique({
       where: { name: legacyName },
@@ -73,8 +128,20 @@ async function seed() {
     }
   }
 
-  // Upsert current plans
   for (const plan of subscriptionPlans) {
+    const stripePriceId = await ensureStripePrice(plan);
+
+    const dbData = {
+      name: plan.name,
+      basePricePerSeat: plan.basePricePerSeat,
+      usageMarkup: plan.usageMarkup,
+      billingInterval: plan.billingInterval,
+      isActive: plan.isActive,
+      trialDays: plan.trialDays,
+      features: plan.features,
+      ...(stripePriceId ? { stripePriceId } : {}),
+    };
+
     const existing = await prisma.subscriptionPlan.findUnique({
       where: { name: plan.name },
     });
@@ -83,19 +150,16 @@ async function seed() {
       console.log(`  Plan "${plan.name}" already exists, updating...`);
       await prisma.subscriptionPlan.update({
         where: { name: plan.name },
-        data: plan,
+        data: dbData,
       });
     } else {
       console.log(`  Creating plan "${plan.name}"...`);
-      await prisma.subscriptionPlan.create({
-        data: plan,
-      });
+      await prisma.subscriptionPlan.create({ data: dbData });
     }
   }
 
   console.log('\nDone seeding subscription plans!\n');
 
-  // List all plans
   const plans = await prisma.subscriptionPlan.findMany({
     orderBy: { isActive: 'desc' },
   });
@@ -104,8 +168,9 @@ async function seed() {
     const status = plan.isActive ? 'ACTIVE' : 'INACTIVE';
     const price = plan.basePricePerSeat / 100;
     const markup = Math.round(plan.usageMarkup * 100);
+    const stripe = plan.stripePriceId ? ` stripe:${plan.stripePriceId}` : ' (no stripe price)';
     console.log(
-      `  [${status}] ${plan.name}: $${price}/seat/month, ${markup}% usage markup, billed ${plan.billingInterval}`
+      `  [${status}] ${plan.name}: $${price}/seat/month, ${markup}% usage markup, billed ${plan.billingInterval}${stripe}`
     );
   }
 }

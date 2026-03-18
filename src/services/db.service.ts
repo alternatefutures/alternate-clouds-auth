@@ -208,7 +208,7 @@ export interface SubscriptionPlan {
   updated_at: number;
 }
 
-export type SubscriptionStatus = 'ACTIVE' | 'CANCELED' | 'PAST_DUE' | 'UNPAID' | 'TRIALING';
+export type SubscriptionStatus = 'ACTIVE' | 'CANCELED' | 'PAST_DUE' | 'UNPAID' | 'TRIALING' | 'TRIAL_EXPIRED' | 'SUSPENDED';
 
 export interface Subscription {
   id: string;
@@ -1442,6 +1442,7 @@ export class DatabaseService {
     const data: Record<string, unknown> = {};
 
     if (updates.stripe_customer_id !== undefined) data.stripeCustomerId = updates.stripe_customer_id;
+    if (updates.trial_converted !== undefined) data.trialConverted = updates.trial_converted;
 
     await this.prisma.organizationBilling.update({
       where: { id },
@@ -2080,7 +2081,7 @@ export class DatabaseService {
     const result = await this.prisma.subscription.findFirst({
       where: {
         orgBillingId,
-        status: { in: ['ACTIVE', 'TRIALING', 'PAST_DUE'] },
+        status: { in: ['ACTIVE', 'TRIALING', 'TRIAL_EXPIRED', 'SUSPENDED', 'PAST_DUE'] },
       },
       orderBy: { createdAt: 'desc' },
     });
@@ -2101,6 +2102,153 @@ export class DatabaseService {
       trial_end: dateToTimestamp(result.trialEnd),
       created_at: result.createdAt.getTime(),
       updated_at: result.updatedAt.getTime(),
+    };
+  }
+
+  // ============================================
+  // TRIAL EXPIRATION HELPERS
+  // ============================================
+
+  /**
+   * Find all subscriptions whose trial has ended but status is still TRIALING.
+   */
+  async getExpiredTrials(): Promise<Array<{ subscriptionId: string; orgBillingId: string; trialEnd: Date }>> {
+    const results = await this.prisma.subscription.findMany({
+      where: {
+        status: 'TRIALING',
+        trialEnd: { lt: new Date() },
+      },
+      select: { id: true, orgBillingId: true, trialEnd: true },
+    });
+    return results
+      .filter((r): r is typeof r & { orgBillingId: string; trialEnd: Date } => !!r.orgBillingId && !!r.trialEnd)
+      .map(r => ({ subscriptionId: r.id, orgBillingId: r.orgBillingId!, trialEnd: r.trialEnd! }));
+  }
+
+  /**
+   * Find all TRIAL_EXPIRED subscriptions whose 3-day grace period has passed.
+   */
+  async getExpiredGracePeriods(): Promise<Array<{ subscriptionId: string; orgBillingId: string }>> {
+    const graceCutoff = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000);
+    const results = await this.prisma.subscription.findMany({
+      where: {
+        status: 'TRIAL_EXPIRED',
+        trialEnd: { lt: graceCutoff },
+      },
+      select: { id: true, orgBillingId: true },
+    });
+    return results
+      .filter((r): r is typeof r & { orgBillingId: string } => !!r.orgBillingId)
+      .map(r => ({ subscriptionId: r.id, orgBillingId: r.orgBillingId! }));
+  }
+
+  /**
+   * Update a subscription's status.
+   */
+  async updateSubscriptionStatus(subscriptionId: string, status: SubscriptionStatus): Promise<void> {
+    await this.prisma.subscription.update({
+      where: { id: subscriptionId },
+      data: { status },
+    });
+  }
+
+  /**
+   * Convert a trial/expired subscription to ACTIVE with new plan and period.
+   */
+  async convertSubscriptionToActive(subscriptionId: string, updates: {
+    planId: string;
+    seats: number;
+    stripeSubscriptionId?: string;
+    currentPeriodStart: Date;
+    currentPeriodEnd: Date;
+  }): Promise<void> {
+    await this.prisma.subscription.update({
+      where: { id: subscriptionId },
+      data: {
+        planId: updates.planId,
+        seats: updates.seats,
+        status: 'ACTIVE',
+        stripeSubscriptionId: updates.stripeSubscriptionId || null,
+        currentPeriodStart: updates.currentPeriodStart,
+        currentPeriodEnd: updates.currentPeriodEnd,
+        trialEnd: null,
+      },
+    });
+  }
+
+  /**
+   * Look up the org owner's email for a given orgBillingId.
+   */
+  async getOrgOwnerEmail(orgBillingId: string): Promise<{ email: string; orgName: string; orgId: string } | null> {
+    const orgBilling = await this.prisma.organizationBilling.findUnique({
+      where: { id: orgBillingId },
+      include: {
+        organization: {
+          include: {
+            members: {
+              where: { role: 'OWNER' },
+              take: 1,
+              include: { user: true },
+            },
+          },
+        },
+      },
+    });
+    if (!orgBilling?.organization?.members?.[0]?.user?.email) return null;
+    return {
+      email: orgBilling.organization.members[0].user.email,
+      orgName: orgBilling.organization.name,
+      orgId: orgBilling.organizationId,
+    };
+  }
+
+  /**
+   * Get subscription status for an org (used by subscription guard).
+   * Returns the most relevant subscription (ACTIVE > TRIALING > TRIAL_EXPIRED > SUSPENDED).
+   */
+  async getOrgSubscriptionStatus(orgId: string): Promise<{
+    status: string;
+    trialEnd: number | null;
+    daysRemaining: number | null;
+    graceRemaining: number | null;
+    planName: string | null;
+  } | null> {
+    const orgBilling = await this.prisma.organizationBilling.findUnique({
+      where: { organizationId: orgId },
+    });
+    if (!orgBilling) return null;
+
+    const sub = await this.prisma.subscription.findFirst({
+      where: {
+        orgBillingId: orgBilling.id,
+        status: { in: ['ACTIVE', 'TRIALING', 'TRIAL_EXPIRED', 'SUSPENDED', 'PAST_DUE'] },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+    if (!sub) return null;
+
+    const plan = sub.planId ? await this.prisma.subscriptionPlan.findUnique({ where: { id: sub.planId } }) : null;
+    const trialEndMs = sub.trialEnd?.getTime() ?? null;
+    const now = Date.now();
+
+    let daysRemaining: number | null = null;
+    let graceRemaining: number | null = null;
+
+    if (trialEndMs) {
+      if (sub.status === 'TRIALING') {
+        daysRemaining = Math.max(0, Math.ceil((trialEndMs - now) / (24 * 60 * 60 * 1000)));
+      } else if (sub.status === 'TRIAL_EXPIRED') {
+        const graceEndMs = trialEndMs + 3 * 24 * 60 * 60 * 1000;
+        graceRemaining = Math.max(0, Math.ceil((graceEndMs - now) / (24 * 60 * 60 * 1000)));
+      }
+    }
+
+    return {
+      status: sub.status,
+      trialEnd: trialEndMs,
+      daysRemaining,
+      graceRemaining,
+      planName: plan?.name ?? null,
     };
   }
 

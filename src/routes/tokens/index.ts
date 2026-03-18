@@ -6,6 +6,7 @@ import { jwtService } from '../../services/jwt.service';
 import { authMiddleware, requireAuthUser } from '../../middleware/auth';
 import { standardRateLimit } from '../../middleware/ratelimit';
 import { timingSafeCompare } from '../../utils/crypto';
+import { subscriptionGuard } from '../../services/subscription.guard';
 
 const app = new Hono();
 const tokenService = new TokenService(dbService);
@@ -13,6 +14,9 @@ const tokenService = new TokenService(dbService);
 // Most routes require authentication (except validate which is internal)
 app.use('/limits', authMiddleware);
 app.use('/', authMiddleware);
+
+// Block token creation for suspended subscriptions (reads still allowed)
+app.post('/', subscriptionGuard);
 
 // Schema for creating a token
 const createTokenSchema = z.object({

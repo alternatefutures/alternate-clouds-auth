@@ -480,4 +480,30 @@ app.post('/notify', async (c) => {
   }
 });
 
+// ============================================
+// SUBSCRIPTION STATUS — For service-cloud-api pre-deploy checks
+// ============================================
+
+/**
+ * GET /internal/billing/subscription-status/:orgId
+ *
+ * Returns the org's subscription status so cloud-api can gate
+ * deployments for SUSPENDED orgs.
+ */
+app.get('/subscription-status/:orgId', async (c) => {
+  try {
+    const { orgId } = c.req.param();
+    const status = await dbService.getOrgSubscriptionStatus(orgId);
+
+    if (!status) {
+      return c.json({ error: 'Organization not found' }, 404);
+    }
+
+    return c.json(status);
+  } catch (error) {
+    console.error('[Internal Billing] Subscription status error:', error);
+    return c.json({ error: 'Internal error' }, 500);
+  }
+});
+
 export default app;

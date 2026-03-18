@@ -84,6 +84,7 @@ export interface ExternalSubscription {
   currentPeriodEnd: number;
   cancelAt?: number;
   canceledAt?: number;
+  clientSecret?: string;
   metadata?: Record<string, string>;
 }
 
@@ -142,6 +143,7 @@ export interface CreateSubscriptionInput {
   priceId: string;
   quantity?: number;
   trialPeriodDays?: number;
+  paymentMethodId?: string;
   metadata?: Record<string, string>;
   // Connect specific
   connectedAccountId?: string;

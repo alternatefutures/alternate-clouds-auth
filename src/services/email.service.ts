@@ -153,6 +153,91 @@ export class EmailService {
 
     await this.sendEmail({ to: email, subject, text, html });
   }
+  async sendTrialExpiredEmail(email: string, orgName: string, orgId: string, gracedays: number = 3): Promise<void> {
+    if (!this.apiKey || process.env.NODE_ENV === 'development') {
+      console.log(`[Email] Trial expired notification for ${email} (org: ${orgName})`);
+      return;
+    }
+
+    const subject = `[Alternate Futures] Your trial has ended — ${gracedays} days to subscribe`;
+    const html = `
+      <!DOCTYPE html>
+      <html>
+        <head><meta charset="utf-8"></head>
+        <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; line-height: 1.6; color: #333;">
+          <div style="max-width: 600px; margin: 0 auto; padding: 20px;">
+            <h2 style="color: #f59e0b;">Your Trial Has Ended</h2>
+            <p>Hi,</p>
+            <p>Your 30-day trial for <strong>${orgName}</strong> on Alternate Futures has ended.</p>
+            <p>You have <strong>${gracedays} days</strong> to subscribe before your access is suspended.
+            During this grace period, all features remain available.</p>
+            <a href="https://app.alternatefutures.ai/org/${orgId}/billing"
+               style="display: inline-block; background: #0026FF; color: white; padding: 12px 24px;
+                      border-radius: 6px; text-decoration: none; margin: 16px 0; font-weight: 600;">
+              Subscribe Now
+            </a>
+            <p style="color: #6b7280; font-size: 14px;">
+              After the grace period, deployments, AI inference, and all platform features
+              will be disabled until you subscribe.
+            </p>
+            <div style="font-size: 12px; color: #666; margin-top: 40px; border-top: 1px solid #eee; padding-top: 16px;">
+              <p>&copy; ${new Date().getFullYear()} Alternate Futures. All rights reserved.</p>
+            </div>
+          </div>
+        </body>
+      </html>
+    `;
+
+    await this.sendEmail({
+      to: email,
+      subject,
+      text: `Your 30-day trial for ${orgName} has ended. Subscribe within ${gracedays} days at https://app.alternatefutures.ai/org/${orgId}/billing`,
+      html,
+    });
+  }
+
+  async sendAccessSuspendedEmail(email: string, orgName: string, orgId: string): Promise<void> {
+    if (!this.apiKey || process.env.NODE_ENV === 'development') {
+      console.log(`[Email] Access suspended notification for ${email} (org: ${orgName})`);
+      return;
+    }
+
+    const subject = `[Alternate Futures] Your access has been suspended`;
+    const html = `
+      <!DOCTYPE html>
+      <html>
+        <head><meta charset="utf-8"></head>
+        <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; line-height: 1.6; color: #333;">
+          <div style="max-width: 600px; margin: 0 auto; padding: 20px;">
+            <h2 style="color: #ef4444;">Access Suspended</h2>
+            <p>Hi,</p>
+            <p>Your grace period for <strong>${orgName}</strong> has ended. All platform features
+            have been suspended, including deployments, AI inference, and the assistant.</p>
+            <p>Subscribe to restore full access immediately:</p>
+            <a href="https://app.alternatefutures.ai/org/${orgId}/billing"
+               style="display: inline-block; background: #0026FF; color: white; padding: 12px 24px;
+                      border-radius: 6px; text-decoration: none; margin: 16px 0; font-weight: 600;">
+              Subscribe Now
+            </a>
+            <p style="color: #6b7280; font-size: 14px;">
+              Your data and configurations are safe. Once you subscribe, everything
+              will be restored.
+            </p>
+            <div style="font-size: 12px; color: #666; margin-top: 40px; border-top: 1px solid #eee; padding-top: 16px;">
+              <p>&copy; ${new Date().getFullYear()} Alternate Futures. All rights reserved.</p>
+            </div>
+          </div>
+        </body>
+      </html>
+    `;
+
+    await this.sendEmail({
+      to: email,
+      subject,
+      text: `Your access to ${orgName} on Alternate Futures has been suspended. Subscribe at https://app.alternatefutures.ai/org/${orgId}/billing to restore access.`,
+      html,
+    });
+  }
 }
 
 // Create singleton instance

@@ -129,7 +129,11 @@ app.get('/active', async (c) => {
 
 /**
  * POST /billing/subscriptions
- * Create a new subscription
+ * Create a new subscription or convert a trial/expired subscription to paid.
+ *
+ * If the user has an existing TRIAL_EXPIRED or SUSPENDED subscription,
+ * the existing row is updated to ACTIVE (trial conversion) instead of
+ * creating a new one.
  */
 app.post('/', async (c) => {
   try {
@@ -142,25 +146,41 @@ app.post('/', async (c) => {
       return c.json({ error: 'Customer not found. Create customer first.' }, 404);
     }
 
-    // Check for existing active subscription
-    const existingSubscription = await dbService.getActiveSubscriptionByCustomerId(customer.id);
-    if (existingSubscription) {
+    // Check for existing ACTIVE subscription (truly active, not trial/suspended)
+    const existingActive = await dbService.getActiveSubscriptionByCustomerId(customer.id);
+    if (existingActive) {
       return c.json({ error: 'Already have an active subscription. Cancel it first.' }, 400);
     }
 
-    // Get the plan
     const plan = await dbService.getSubscriptionPlanById(data.planId);
     if (!plan) {
       return c.json({ error: 'Plan not found' }, 404);
     }
 
-    // Guard: only allow subscribing to active plans
     if (!plan.is_active) {
       return c.json({ error: 'This plan is no longer available' }, 400);
     }
 
-    // Calculate period end based on billing interval
+    // Look for a trial/expired/suspended subscription to convert
+    const orgs = await dbService.getOrganizationsByUserId(user.userId);
+    let existingTrialSub: Awaited<ReturnType<typeof dbService.getSubscriptionByOrgBillingId>> | null = null;
+    let orgBillingId: string | null = null;
+
+    for (const org of orgs) {
+      const billing = await dbService.getOrganizationBillingByOrgId(org.id);
+      if (!billing) continue;
+
+      // Find any subscription (including TRIAL_EXPIRED, SUSPENDED) for this org
+      const sub = await dbService.getSubscriptionByOrgBillingId(billing.id);
+      if (sub && ['TRIALING', 'TRIAL_EXPIRED', 'SUSPENDED'].includes(sub.status)) {
+        existingTrialSub = sub;
+        orgBillingId = billing.id;
+        break;
+      }
+    }
+
     let stripeSubscriptionId: string | undefined;
+    let clientSecret: string | undefined;
     const now = Date.now();
     const periodEnd = new Date(now);
 
@@ -170,7 +190,7 @@ app.post('/', async (c) => {
       periodEnd.setMonth(periodEnd.getMonth() + 1);
     }
 
-    // Create subscription in Stripe (if plan has a Stripe price)
+    // Create Stripe subscription if plan has a price and customer has Stripe ID
     if (plan.stripe_price_id && customer.stripe_customer_id) {
       const provider = getDefaultProvider();
       if (provider.createSubscription) {
@@ -178,26 +198,56 @@ app.post('/', async (c) => {
           customerId: customer.stripe_customer_id,
           priceId: plan.stripe_price_id,
           quantity: data.seats,
+          paymentMethodId: data.paymentMethodId,
           metadata: { userId: user.userId },
         });
         stripeSubscriptionId = externalSub.id;
+        clientSecret = externalSub.clientSecret;
       }
     }
 
-    // Create subscription in database
-    const subscription = await dbService.createSubscription({
-      id: nanoid(),
-      customer_id: customer.id,
-      plan_id: plan.id,
-      status: 'ACTIVE',
-      seats: data.seats,
-      stripe_subscription_id: stripeSubscriptionId,
-      current_period_start: Math.floor(now / 1000),
-      current_period_end: Math.floor(periodEnd.getTime() / 1000),
-    });
+    let subscriptionResult;
 
-    return c.json({
-      subscription: {
+    if (existingTrialSub && orgBillingId) {
+      // Convert existing trial subscription to ACTIVE
+      await dbService.convertSubscriptionToActive(existingTrialSub.id, {
+        planId: plan.id,
+        seats: data.seats,
+        stripeSubscriptionId,
+        currentPeriodStart: new Date(now),
+        currentPeriodEnd: periodEnd,
+      });
+
+      // Mark trial as converted
+      await dbService.updateOrganizationBilling(orgBillingId, {
+        trial_converted: true,
+      });
+
+      subscriptionResult = {
+        id: existingTrialSub.id,
+        plan: plan.name,
+        billingInterval: plan.billing_interval,
+        status: 'ACTIVE',
+        seats: data.seats,
+        basePricePerSeat: plan.base_price_per_seat,
+        currentPeriodStart: now,
+        currentPeriodEnd: periodEnd.getTime(),
+        createdAt: existingTrialSub.created_at,
+      };
+    } else {
+      // Create new subscription
+      const subscription = await dbService.createSubscription({
+        id: nanoid(),
+        customer_id: customer.id,
+        plan_id: plan.id,
+        status: 'ACTIVE',
+        seats: data.seats,
+        stripe_subscription_id: stripeSubscriptionId,
+        current_period_start: Math.floor(now / 1000),
+        current_period_end: Math.floor(periodEnd.getTime() / 1000),
+      });
+
+      subscriptionResult = {
         id: subscription.id,
         plan: plan.name,
         billingInterval: plan.billing_interval,
@@ -207,7 +257,12 @@ app.post('/', async (c) => {
         currentPeriodStart: subscription.current_period_start,
         currentPeriodEnd: subscription.current_period_end,
         createdAt: subscription.created_at,
-      },
+      };
+    }
+
+    return c.json({
+      subscription: subscriptionResult,
+      ...(clientSecret ? { clientSecret } : {}),
     });
   } catch (error) {
     console.error('Create subscription error:', error);
@@ -409,6 +464,9 @@ app.get('/org/:orgId', async (c) => {
         converted: orgBilling.trial_converted,
         daysRemaining: orgBilling.trial_ends_at
           ? Math.max(0, Math.ceil((orgBilling.trial_ends_at - Date.now()) / (24 * 60 * 60 * 1000)))
+          : null,
+        graceRemaining: (subscription.status === 'TRIAL_EXPIRED' && orgBilling.trial_ends_at)
+          ? Math.max(0, Math.ceil((orgBilling.trial_ends_at + 3 * 24 * 60 * 60 * 1000 - Date.now()) / (24 * 60 * 60 * 1000)))
           : null,
       },
     });

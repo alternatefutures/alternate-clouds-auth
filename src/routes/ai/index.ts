@@ -5,6 +5,7 @@
 
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
+import { subscriptionGuard } from '../../services/subscription.guard';
 import openaiRoutes from './openai';
 import anthropicRoutes from './anthropic';
 import openrouterRoutes from './openrouter';
@@ -26,6 +27,9 @@ app.use('*', cors({
   allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowHeaders: ['*'],
 }));
+
+// Block AI proxy access for suspended subscriptions
+app.use('*', subscriptionGuard);
 
 // Mount provider routes
 app.route('/openai', openaiRoutes);

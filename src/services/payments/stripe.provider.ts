@@ -243,7 +243,7 @@ export class StripeProvider implements PaymentProvider {
 
   // Subscriptions
   async createSubscription(input: CreateSubscriptionInput): Promise<ExternalSubscription> {
-    const subscription = await this.stripe.subscriptions.create({
+    const params: Stripe.SubscriptionCreateParams = {
       customer: input.customerId,
       items: [{ price: input.priceId, quantity: input.quantity || 1 }],
       trial_period_days: input.trialPeriodDays,
@@ -251,9 +251,24 @@ export class StripeProvider implements PaymentProvider {
       payment_behavior: 'default_incomplete',
       payment_settings: { save_default_payment_method: 'on_subscription' },
       expand: ['latest_invoice.payment_intent'],
-    });
+    };
 
-    return this.mapSubscription(subscription);
+    if (input.paymentMethodId) {
+      params.default_payment_method = input.paymentMethodId;
+    }
+
+    const subscription = await this.stripe.subscriptions.create(params);
+
+    const result = this.mapSubscription(subscription);
+
+    // Extract client_secret from the latest invoice's payment intent (for SCA/3DS)
+    const invoice = subscription.latest_invoice as Stripe.Invoice | null;
+    const pi = invoice?.payment_intent as Stripe.PaymentIntent | null;
+    if (pi?.client_secret) {
+      result.clientSecret = pi.client_secret;
+    }
+
+    return result;
   }
 
   async getSubscription(subscriptionId: string): Promise<ExternalSubscription | null> {

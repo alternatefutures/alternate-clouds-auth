@@ -301,7 +301,7 @@ model Subscription {
   customerId           String    @map("customer_id")
   orgBillingId         String?   @map("org_billing_id")
   planId               String    @map("plan_id")
-  status               String    // ACTIVE, CANCELED, PAST_DUE, UNPAID, TRIALING
+  status               String    // ACTIVE, TRIALING, TRIAL_EXPIRED, SUSPENDED, CANCELED, PAST_DUE, UNPAID
   seats                Int       @default(1)
   stripeSubscriptionId String?   @unique @map("stripe_subscription_id")
   currentPeriodStart   DateTime  @map("current_period_start")

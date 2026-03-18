@@ -21,6 +21,7 @@ import organizationsRoutes from './routes/organizations';
 import aiRoutes from './routes/ai';
 import v1Routes from './routes/ai/v1';
 import whitelistRoutes from './routes/admin/whitelist';
+import { startTrialScheduler, stopTrialScheduler } from './services/trialScheduler';
 
 // Initialize secrets before anything else
 await secretsService.initialize();
@@ -235,3 +236,15 @@ if (process.env.NODE_ENV !== 'production' || !process.env.CLOUDFLARE_ACCOUNT_ID)
 
   console.log(`✅ Server listening on http://localhost:${port}`);
 }
+
+// Start trial expiration scheduler (runs in all environments)
+startTrialScheduler();
+
+// Graceful shutdown — stop scheduler before process exits
+const shutdown = () => {
+  console.log('🛑 Shutting down trial scheduler...');
+  stopTrialScheduler();
+  process.exit(0);
+};
+process.on('SIGTERM', shutdown);
+process.on('SIGINT', shutdown);
