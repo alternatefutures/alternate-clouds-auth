@@ -63,8 +63,10 @@ jobs:
       - name: Deploy to K3s
         if: github.ref == 'refs/heads/main'
         run: |
+          IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:main-${GITHUB_SHA::7}"
+          echo "Deploying image: ${IMAGE}"
           kubectl set image deployment/service-auth \
-            service-auth=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest \
+            service-auth=${IMAGE} \
             -n af-production --insecure-skip-tls-verify
           kubectl rollout status deployment/service-auth \
             -n af-production --timeout=120s --insecure-skip-tls-verify
