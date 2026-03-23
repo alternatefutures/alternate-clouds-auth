@@ -213,6 +213,7 @@ export type SubscriptionStatus = 'ACTIVE' | 'CANCELED' | 'PAST_DUE' | 'UNPAID' |
 export interface Subscription {
   id: string;
   customer_id: string;
+  org_billing_id?: string;
   plan_id: string;
   status: SubscriptionStatus;
   seats: number;
@@ -1914,6 +1915,7 @@ export class DatabaseService {
       data: {
         id: sub.id,
         customerId: sub.customer_id,
+        orgBillingId: sub.org_billing_id,
         planId: sub.plan_id,
         status: sub.status,
         seats: sub.seats,
@@ -1929,6 +1931,7 @@ export class DatabaseService {
     return {
       id: result.id,
       customer_id: result.customerId,
+      org_billing_id: result.orgBillingId ?? undefined,
       plan_id: result.planId,
       status: result.status as SubscriptionStatus,
       seats: result.seats,
@@ -1953,6 +1956,7 @@ export class DatabaseService {
     return {
       id: result.id,
       customer_id: result.customerId,
+      org_billing_id: result.orgBillingId ?? undefined,
       plan_id: result.planId,
       status: result.status as SubscriptionStatus,
       seats: result.seats,
@@ -1974,6 +1978,7 @@ export class DatabaseService {
     return {
       id: result.id,
       customer_id: result.customerId,
+      org_billing_id: result.orgBillingId ?? undefined,
       plan_id: result.planId,
       status: result.status as SubscriptionStatus,
       seats: result.seats,
@@ -2019,6 +2024,7 @@ export class DatabaseService {
     return {
       id: result.id,
       customer_id: result.customerId,
+      org_billing_id: result.orgBillingId ?? undefined,
       plan_id: result.planId,
       status: result.status as SubscriptionStatus,
       seats: result.seats,
@@ -2040,6 +2046,7 @@ export class DatabaseService {
     return {
       id: result.id,
       customer_id: result.customerId,
+      org_billing_id: result.orgBillingId ?? undefined,
       plan_id: result.planId,
       status: result.status as SubscriptionStatus,
       seats: result.seats,
@@ -2063,6 +2070,7 @@ export class DatabaseService {
     return results.map((result) => ({
       id: result.id,
       customer_id: result.customerId,
+      org_billing_id: result.orgBillingId ?? undefined,
       plan_id: result.planId,
       status: result.status as SubscriptionStatus,
       seats: result.seats,
@@ -2091,6 +2099,7 @@ export class DatabaseService {
     return {
       id: result.id,
       customer_id: result.customerId,
+      org_billing_id: result.orgBillingId ?? undefined,
       plan_id: result.planId,
       status: result.status as SubscriptionStatus,
       seats: result.seats,
@@ -2335,10 +2344,15 @@ export class DatabaseService {
     const data: Record<string, unknown> = {};
 
     if (updates.status !== undefined) data.status = updates.status;
+    if (updates.subtotal !== undefined) data.subtotal = updates.subtotal;
+    if (updates.tax !== undefined) data.tax = updates.tax;
+    if (updates.total !== undefined) data.total = updates.total;
     if (updates.amount_paid !== undefined) data.amountPaid = updates.amount_paid;
     if (updates.amount_due !== undefined) data.amountDue = updates.amount_due;
     if (updates.paid_at !== undefined) data.paidAt = timestampToDate(updates.paid_at);
     if (updates.pdf_url !== undefined) data.pdfUrl = updates.pdf_url;
+    if (updates.invoice_number !== undefined) data.invoiceNumber = updates.invoice_number;
+    if (updates.stripe_invoice_id !== undefined) data.stripeInvoiceId = updates.stripe_invoice_id;
 
     await this.prisma.invoice.update({
       where: { id },

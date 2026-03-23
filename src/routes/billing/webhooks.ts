@@ -44,7 +44,7 @@ app.post('/stripe', async (c) => {
     }
 
     // Store event
-    await dbService.createWebhookEvent({
+    const dbRecord = await dbService.createWebhookEvent({
       id: nanoid(),
       provider: 'stripe',
       event_type: event.type,
@@ -56,11 +56,11 @@ app.post('/stripe', async (c) => {
     // Process event
     try {
       await processStripeEvent(event);
-      await dbService.markWebhookEventProcessed(event.id);
+      await dbService.markWebhookEventProcessed(dbRecord.id);
     } catch (processError) {
       console.error('Stripe webhook processing error:', processError);
       await dbService.markWebhookEventProcessed(
-        event.id,
+        dbRecord.id,
         processError instanceof Error ? processError.message : 'Unknown error'
       );
     }
@@ -105,7 +105,7 @@ app.post('/stax', async (c) => {
     }
 
     // Store event
-    await dbService.createWebhookEvent({
+    const dbRecord = await dbService.createWebhookEvent({
       id: nanoid(),
       provider: 'stax',
       event_type: event.type,
@@ -117,11 +117,11 @@ app.post('/stax', async (c) => {
     // Process event
     try {
       await processStaxEvent(event);
-      await dbService.markWebhookEventProcessed(event.id);
+      await dbService.markWebhookEventProcessed(dbRecord.id);
     } catch (processError) {
       console.error('Stax webhook processing error:', processError);
       await dbService.markWebhookEventProcessed(
-        event.id,
+        dbRecord.id,
         processError instanceof Error ? processError.message : 'Unknown error'
       );
     }
@@ -166,7 +166,7 @@ app.post('/relay', async (c) => {
     }
 
     // Store event
-    await dbService.createWebhookEvent({
+    const dbRecord = await dbService.createWebhookEvent({
       id: nanoid(),
       provider: 'relay',
       event_type: event.type,
@@ -178,11 +178,11 @@ app.post('/relay', async (c) => {
     // Process event
     try {
       await processRelayEvent(event);
-      await dbService.markWebhookEventProcessed(event.id);
+      await dbService.markWebhookEventProcessed(dbRecord.id);
     } catch (processError) {
       console.error('Relay webhook processing error:', processError);
       await dbService.markWebhookEventProcessed(
-        event.id,
+        dbRecord.id,
         processError instanceof Error ? processError.message : 'Unknown error'
       );
     }
@@ -200,6 +200,17 @@ interface WebhookEvent {
   id: string;
   type: string;
   data: unknown;
+}
+
+function mapStripeInvoiceStatus(stripeStatus: string): 'DRAFT' | 'OPEN' | 'PAID' | 'VOID' | 'UNCOLLECTIBLE' {
+  const map: Record<string, 'DRAFT' | 'OPEN' | 'PAID' | 'VOID' | 'UNCOLLECTIBLE'> = {
+    draft: 'DRAFT',
+    open: 'OPEN',
+    paid: 'PAID',
+    void: 'VOID',
+    uncollectible: 'UNCOLLECTIBLE',
+  };
+  return map[stripeStatus] || 'OPEN';
 }
 
 async function processStripeEvent(event: WebhookEvent): Promise<void> {
@@ -281,14 +292,98 @@ async function processStripeEvent(event: WebhookEvent): Promise<void> {
           unpaid: 'UNPAID',
           trialing: 'TRIALING',
         };
+        const periodStart = data.current_period_start as number | undefined;
+        const periodEnd = data.current_period_end as number | undefined;
+        const cancelAt = data.cancel_at as number | undefined;
+        const canceledAt = data.canceled_at as number | undefined;
         await dbService.updateSubscription(subscription.id, {
           status: (statusMap[status] || 'ACTIVE') as 'ACTIVE' | 'CANCELED' | 'PAST_DUE' | 'UNPAID' | 'TRIALING',
-          current_period_start: data.current_period_start as number,
-          current_period_end: data.current_period_end as number,
-          cancel_at: data.cancel_at as number | undefined,
-          canceled_at: data.canceled_at as number | undefined,
+          current_period_start: periodStart ? periodStart * 1000 : undefined,
+          current_period_end: periodEnd ? periodEnd * 1000 : undefined,
+          cancel_at: cancelAt ? cancelAt * 1000 : undefined,
+          canceled_at: canceledAt ? canceledAt * 1000 : undefined,
         });
       }
+      break;
+    }
+
+    case 'invoice.created':
+    case 'invoice.finalized': {
+      const stripeInvoiceId = data.id as string;
+      const existing = await dbService.getInvoiceByStripeId(stripeInvoiceId);
+      if (existing) {
+        await dbService.updateInvoice(existing.id, {
+          status: mapStripeInvoiceStatus(data.status as string),
+          subtotal: data.subtotal as number,
+          tax: (data.tax as number) ?? 0,
+          total: data.total as number,
+          amount_paid: data.amount_paid as number,
+          amount_due: data.amount_due as number,
+          pdf_url: (data.invoice_pdf as string) ?? existing.pdf_url,
+        });
+        break;
+      }
+
+      const stripeCustomerId = data.customer as string;
+      const customer = stripeCustomerId
+        ? await dbService.getBillingCustomerByStripeId(stripeCustomerId)
+        : null;
+      if (!customer) break;
+
+      const subscriptionStripeId = data.subscription as string | undefined;
+      const subscription = subscriptionStripeId
+        ? await dbService.getSubscriptionByStripeId(subscriptionStripeId)
+        : null;
+
+      // Check if a local invoice already exists for this subscription+period
+      // (created at subscribe time before webhooks arrive)
+      const invPeriodStart = data.period_start ? (data.period_start as number) * 1000 : undefined;
+      const invPeriodEnd = data.period_end ? (data.period_end as number) * 1000 : undefined;
+      const invDueDate = data.due_date ? (data.due_date as number) * 1000 : undefined;
+
+      if (subscription) {
+        const existingInvoices = await dbService.listInvoicesByCustomerId(customer.id);
+        const matchByPeriod = existingInvoices.find(
+          (inv) =>
+            inv.subscription_id === subscription.id &&
+            inv.period_start === invPeriodStart &&
+            inv.period_end === invPeriodEnd &&
+            !inv.stripe_invoice_id
+        );
+        if (matchByPeriod) {
+          await dbService.updateInvoice(matchByPeriod.id, {
+            stripe_invoice_id: stripeInvoiceId,
+            invoice_number: (data.number as string) || matchByPeriod.invoice_number,
+            status: mapStripeInvoiceStatus(data.status as string),
+            subtotal: (data.subtotal as number) ?? matchByPeriod.subtotal,
+            tax: (data.tax as number) ?? matchByPeriod.tax,
+            total: (data.total as number) ?? matchByPeriod.total,
+            amount_paid: (data.amount_paid as number) ?? matchByPeriod.amount_paid,
+            amount_due: (data.amount_due as number) ?? matchByPeriod.amount_due,
+            pdf_url: (data.invoice_pdf as string) ?? matchByPeriod.pdf_url,
+          });
+          break;
+        }
+      }
+
+      await dbService.createInvoice({
+        id: nanoid(),
+        customer_id: customer.id,
+        subscription_id: subscription?.id,
+        invoice_number: (data.number as string) || `STRIPE-${stripeInvoiceId.slice(-8)}`,
+        status: mapStripeInvoiceStatus(data.status as string),
+        subtotal: (data.subtotal as number) ?? 0,
+        tax: (data.tax as number) ?? 0,
+        total: (data.total as number) ?? 0,
+        amount_paid: (data.amount_paid as number) ?? 0,
+        amount_due: (data.amount_due as number) ?? 0,
+        currency: (data.currency as string) ?? 'usd',
+        period_start: invPeriodStart,
+        period_end: invPeriodEnd,
+        due_date: invDueDate,
+        pdf_url: (data.invoice_pdf as string) ?? undefined,
+        stripe_invoice_id: stripeInvoiceId,
+      });
       break;
     }
 
@@ -301,6 +396,7 @@ async function processStripeEvent(event: WebhookEvent): Promise<void> {
           amount_paid: invoice.total,
           amount_due: 0,
           paid_at: Date.now(),
+          pdf_url: (data.invoice_pdf as string) ?? invoice.pdf_url,
         });
       }
       break;

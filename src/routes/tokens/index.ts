@@ -7,9 +7,13 @@ import { authMiddleware, requireAuthUser } from '../../middleware/auth';
 import { standardRateLimit } from '../../middleware/ratelimit';
 import { timingSafeCompare } from '../../utils/crypto';
 import { subscriptionGuard } from '../../services/subscription.guard';
+import internalRoutes from './internal';
 
 const app = new Hono();
 const tokenService = new TokenService(dbService);
+
+// Internal service-to-service API (protected by introspection secret)
+app.route('/internal', internalRoutes);
 
 // Most routes require authentication (except validate which is internal)
 app.use('/limits', authMiddleware);

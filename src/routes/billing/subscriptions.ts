@@ -22,6 +22,7 @@ const createSubscriptionSchema = z.object({
   planId: z.string().min(1),
   seats: z.number().int().min(1).optional().default(1),
   paymentMethodId: z.string().min(1).optional(),
+  orgId: z.string().min(1).optional(),
 });
 
 const updateSeatsSchema = z.object({
@@ -149,7 +150,12 @@ app.post('/', async (c) => {
     // Check for existing ACTIVE subscription (truly active, not trial/suspended)
     const existingActive = await dbService.getActiveSubscriptionByCustomerId(customer.id);
     if (existingActive) {
-      return c.json({ error: 'Already have an active subscription. Cancel it first.' }, 400);
+      // If the active subscription has no org link (orphaned), cancel it so the user can resubscribe
+      if (!existingActive.org_billing_id) {
+        await dbService.updateSubscription(existingActive.id, { status: 'CANCELED', canceled_at: Date.now() });
+      } else {
+        return c.json({ error: 'Already have an active subscription. Cancel it first.' }, 400);
+      }
     }
 
     const plan = await dbService.getSubscriptionPlanById(data.planId);
@@ -161,21 +167,41 @@ app.post('/', async (c) => {
       return c.json({ error: 'This plan is no longer available' }, 400);
     }
 
-    // Look for a trial/expired/suspended subscription to convert
+    // Resolve org billing and look for a trial/expired/suspended subscription to convert
     const orgs = await dbService.getOrganizationsByUserId(user.userId);
     let existingTrialSub: Awaited<ReturnType<typeof dbService.getSubscriptionByOrgBillingId>> | null = null;
     let orgBillingId: string | null = null;
 
-    for (const org of orgs) {
-      const billing = await dbService.getOrganizationBillingByOrgId(org.id);
-      if (!billing) continue;
-
-      // Find any subscription (including TRIAL_EXPIRED, SUSPENDED) for this org
-      const sub = await dbService.getSubscriptionByOrgBillingId(billing.id);
-      if (sub && ['TRIALING', 'TRIAL_EXPIRED', 'SUSPENDED'].includes(sub.status)) {
-        existingTrialSub = sub;
+    // If frontend specified an orgId, resolve that org's billing first
+    if (data.orgId) {
+      const isMember = await dbService.isUserMemberOfOrganization(user.userId, data.orgId);
+      if (!isMember) {
+        return c.json({ error: 'Not a member of this organization' }, 403);
+      }
+      const billing = await dbService.getOrganizationBillingByOrgId(data.orgId);
+      if (billing) {
         orgBillingId = billing.id;
-        break;
+        const sub = await dbService.getSubscriptionByOrgBillingId(billing.id);
+        if (sub && ['TRIALING', 'TRIAL_EXPIRED', 'SUSPENDED'].includes(sub.status)) {
+          existingTrialSub = sub;
+        }
+      }
+    }
+
+    // Fallback: scan all user orgs
+    if (!orgBillingId) {
+      for (const org of orgs) {
+        const billing = await dbService.getOrganizationBillingByOrgId(org.id);
+        if (!billing) continue;
+
+        if (!orgBillingId) orgBillingId = billing.id;
+
+        const sub = await dbService.getSubscriptionByOrgBillingId(billing.id);
+        if (sub && ['TRIALING', 'TRIAL_EXPIRED', 'SUSPENDED'].includes(sub.status)) {
+          existingTrialSub = sub;
+          orgBillingId = billing.id;
+          break;
+        }
       }
     }
 
@@ -239,12 +265,13 @@ app.post('/', async (c) => {
       const subscription = await dbService.createSubscription({
         id: nanoid(),
         customer_id: customer.id,
+        org_billing_id: orgBillingId ?? undefined,
         plan_id: plan.id,
         status: 'ACTIVE',
         seats: data.seats,
         stripe_subscription_id: stripeSubscriptionId,
-        current_period_start: Math.floor(now / 1000),
-        current_period_end: Math.floor(periodEnd.getTime() / 1000),
+        current_period_start: now,
+        current_period_end: periodEnd.getTime(),
       });
 
       subscriptionResult = {
@@ -258,6 +285,32 @@ app.post('/', async (c) => {
         currentPeriodEnd: subscription.current_period_end,
         createdAt: subscription.created_at,
       };
+    }
+
+    // Create initial invoice for this billing period
+    try {
+      const subscriptionAmount = plan.base_price_per_seat * (data.seats || 1);
+      const invoiceNumber = `INV-${customer.id.slice(0, 8).toUpperCase()}-${nanoid(6).toUpperCase()}`;
+
+      await dbService.createInvoice({
+        id: nanoid(),
+        customer_id: customer.id,
+        subscription_id: subscriptionResult.id,
+        invoice_number: invoiceNumber,
+        status: clientSecret ? 'OPEN' : 'PAID',
+        subtotal: subscriptionAmount,
+        tax: 0,
+        total: subscriptionAmount,
+        amount_paid: clientSecret ? 0 : subscriptionAmount,
+        amount_due: clientSecret ? subscriptionAmount : 0,
+        currency: 'usd',
+        period_start: subscriptionResult.currentPeriodStart,
+        period_end: subscriptionResult.currentPeriodEnd,
+        due_date: subscriptionResult.currentPeriodEnd,
+        paid_at: clientSecret ? undefined : now,
+      });
+    } catch (invoiceErr) {
+      console.error('Failed to create initial invoice (non-fatal):', invoiceErr);
     }
 
     return c.json({
@@ -306,7 +359,7 @@ app.post('/:id/cancel', async (c) => {
 
     // Update in database
     const updates: Record<string, unknown> = {
-      status: immediately ? 'CANCELED' : 'ACTIVE',
+      status: immediately ? 'CANCELED' : subscription.status,
       canceled_at: Date.now(),
     };
 
