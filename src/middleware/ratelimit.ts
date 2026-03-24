@@ -91,10 +91,19 @@ let redisStore: RateLimitStoreBackend | null = null;
 async function createRedisStore(redisUrl: string): Promise<RateLimitStoreBackend | null> {
   try {
     const { createClient } = await import('redis');
-    const client = createClient({ url: redisUrl });
+    const client = createClient({
+      url: redisUrl,
+      socket: {
+        reconnectStrategy: false,
+      },
+    });
     
+    let errorLogged = false;
     client.on('error', (err) => {
-      console.error('[RateLimit] Redis error:', err.message);
+      if (!errorLogged) {
+        console.warn('[RateLimit] Redis error:', err.message);
+        errorLogged = true;
+      }
     });
 
     await client.connect();
