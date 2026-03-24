@@ -7,6 +7,7 @@ import { authMiddleware, requireAuthUser } from '../../middleware/auth';
 import { standardRateLimit } from '../../middleware/ratelimit';
 import { timingSafeCompare } from '../../utils/crypto';
 import { subscriptionGuard } from '../../services/subscription.guard';
+import { auditLogService } from '../../services/auditLog.service';
 import internalRoutes from './internal';
 
 const app = new Hono();
@@ -54,6 +55,12 @@ app.post('/', standardRateLimit, async (c) => {
 
     // Create token
     const token = await tokenService.createToken(authUser.userId, name, expiresAt, organizationId);
+
+    await auditLogService.logFromContext(c, {
+      userId: authUser.userId,
+      eventType: 'PAT_CREATED',
+      metadata: { tokenId: token.id, name: token.name, organizationId },
+    });
 
     return c.json({
       success: true,
@@ -143,6 +150,12 @@ app.delete('/:id', standardRateLimit, async (c) => {
 
     // Delete token
     await tokenService.deleteToken(tokenId, authUser.userId);
+
+    await auditLogService.logFromContext(c, {
+      userId: authUser.userId,
+      eventType: 'PAT_DELETED',
+      metadata: { tokenId },
+    });
 
     return c.json({
       success: true,

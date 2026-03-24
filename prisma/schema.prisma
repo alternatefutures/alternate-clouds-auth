@@ -80,6 +80,8 @@ model AuthSession {
   id             String    @id @default(uuid())
   userId         String    @map("user_id")
   refreshToken   String    @unique @map("refresh_token")
+  tokenFamily    String    @default(uuid()) @map("token_family")
+  tokenVersion   Int       @default(0) @map("token_version")
   userAgent      String?   @map("user_agent")
   ipAddress      String?   @map("ip_address")
   deviceId       String?   @map("device_id")
@@ -92,7 +94,43 @@ model AuthSession {
   user AuthUser @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
+  @@index([tokenFamily])
   @@map("auth_sessions")
+}
+
+// ============================================
+// AUTH AUDIT LOG
+// ============================================
+
+enum AuthAuditEventType {
+  LOGIN_SUCCESS
+  LOGIN_FAILURE
+  TOKEN_REFRESH
+  TOKEN_REFRESH_REUSE
+  SESSION_REVOKE
+  PASSWORD_CHANGE
+  MFA_ENABLED
+  MFA_DISABLED
+  PAT_CREATED
+  PAT_DELETED
+  ACCOUNT_LOCKED
+  RATE_LIMIT_EXCEEDED
+}
+
+model AuthAuditLog {
+  id        String             @id @default(uuid())
+  userId    String?            @map("user_id")
+  eventType AuthAuditEventType @map("event_type")
+  ipAddress String?            @map("ip_address")
+  userAgent String?            @map("user_agent")
+  metadata  Json               @default("{}") @map("metadata")
+  riskScore Int                @default(0) @map("risk_score")
+  createdAt DateTime           @default(now()) @map("created_at")
+
+  @@index([userId, createdAt])
+  @@index([eventType, createdAt])
+  @@index([ipAddress, createdAt])
+  @@map("auth_audit_log")
 }
 
 model VerificationCode {

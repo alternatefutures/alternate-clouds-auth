@@ -46,6 +46,7 @@
     "nanoid": "^5.0.7",
     "stripe": "^20.0.0",
     "twilio": "^5.10.7",
+    "redis": "^4.7.0",
     "zod": "^4.1.12"
   },
   "devDependencies": {

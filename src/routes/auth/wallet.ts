@@ -1,5 +1,6 @@
 import { Hono } from 'hono';
 import { nanoid } from 'nanoid';
+import { randomUUID } from 'node:crypto';
 import { dbService } from '../../services/db.service';
 import { jwtService } from '../../services/jwt.service';
 import { siweService } from '../../services/siwe.service';
@@ -7,6 +8,8 @@ import { generateNonce } from '../../utils/otp';
 import { walletChallengeRequestSchema, walletVerifySchema, validateSolanaAddress } from '../../utils/validators';
 import { strictRateLimit } from '../../middleware/ratelimit';
 import { whitelistService } from '../../services/whitelist.service';
+import { auditLogService } from '../../services/auditLog.service';
+import { generateDeviceFingerprint } from '../../utils/fingerprint';
 
 const app = new Hono();
 
@@ -121,6 +124,10 @@ app.post('/verify', strictRateLimit, async (c) => {
     const isValid = siweService.verifySignature(message, signature, address);
 
     if (!isValid) {
+      await auditLogService.logFromContext(c, {
+        eventType: 'LOGIN_FAILURE',
+        metadata: { method: 'wallet', reason: 'invalid_signature', address: address.toLowerCase() },
+      });
       return c.json({ error: 'Invalid signature' }, 400);
     }
 
@@ -208,14 +215,24 @@ app.post('/verify', strictRateLimit, async (c) => {
 
     // Store session in database
     const expiresAt = Date.now() + 7 * 24 * 60 * 60 * 1000; // 7 days
+    const deviceId = generateDeviceFingerprint(c);
     await dbService.createSession({
       id: sessionId,
       user_id: user.id,
       refresh_token: refreshToken,
+      token_family: randomUUID(),
+      token_version: 0,
       user_agent: c.req.header('user-agent'),
       ip_address: c.req.header('x-forwarded-for') || c.req.header('x-real-ip'),
+      device_id: deviceId,
       expires_at: expiresAt,
       revoked: 0,
+    });
+
+    await auditLogService.logFromContext(c, {
+      userId: user.id,
+      eventType: 'LOGIN_SUCCESS',
+      metadata: { method: 'wallet', address: address.toLowerCase(), deviceId },
     });
 
     return c.json({

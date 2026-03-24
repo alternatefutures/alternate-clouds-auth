@@ -1,5 +1,6 @@
 import { Hono } from 'hono';
 import { nanoid } from 'nanoid';
+import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { emailService } from '../../services/email.service';
 import { dbService } from '../../services/db.service';
@@ -9,6 +10,8 @@ import { emailAuthRequestSchema, emailAuthVerifySchema } from '../../utils/valid
 import { timingSafeCompare } from '../../utils/crypto';
 import { strictRateLimit } from '../../middleware/ratelimit';
 import { whitelistService } from '../../services/whitelist.service';
+import { auditLogService } from '../../services/auditLog.service';
+import { generateDeviceFingerprint } from '../../utils/fingerprint';
 
 const app = new Hono();
 
@@ -91,8 +94,12 @@ app.post('/verify', strictRateLimit, async (c) => {
 
     // Verify code (timing-safe comparison to prevent timing attacks)
     if (!timingSafeCompare(verificationCode.code, code)) {
-      // Increment attempt counter
       await dbService.incrementVerificationAttempts(verificationCode.id);
+
+      await auditLogService.logFromContext(c, {
+        eventType: 'LOGIN_FAILURE',
+        metadata: { method: 'email', reason: 'invalid_code', identifier: email },
+      });
 
       return c.json({
         error: 'Invalid verification code',
@@ -195,14 +202,24 @@ app.post('/verify', strictRateLimit, async (c) => {
 
     // Store session in database
     const expiresAt = Date.now() + 7 * 24 * 60 * 60 * 1000; // 7 days
+    const deviceId = generateDeviceFingerprint(c);
     await dbService.createSession({
       id: sessionId,
       user_id: user.id,
       refresh_token: refreshToken,
+      token_family: randomUUID(),
+      token_version: 0,
       user_agent: c.req.header('user-agent'),
       ip_address: c.req.header('x-forwarded-for') || c.req.header('x-real-ip'),
+      device_id: deviceId,
       expires_at: expiresAt,
       revoked: 0,
+    });
+
+    await auditLogService.logFromContext(c, {
+      userId: user.id,
+      eventType: 'LOGIN_SUCCESS',
+      metadata: { method: 'email', isNewUser, deviceId },
     });
 
     return c.json({

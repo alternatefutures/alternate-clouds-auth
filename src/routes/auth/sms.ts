@@ -1,5 +1,6 @@
 import { Hono } from 'hono';
 import { nanoid } from 'nanoid';
+import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { smsService } from '../../services/sms.service';
 import { dbService } from '../../services/db.service';
@@ -9,6 +10,8 @@ import { smsAuthRequestSchema, smsAuthVerifySchema } from '../../utils/validator
 import { strictRateLimit } from '../../middleware/ratelimit';
 import { timingSafeCompare } from '../../utils/crypto';
 import { whitelistService } from '../../services/whitelist.service';
+import { auditLogService } from '../../services/auditLog.service';
+import { generateDeviceFingerprint } from '../../utils/fingerprint';
 
 const app = new Hono();
 
@@ -87,8 +90,13 @@ app.post('/verify', strictRateLimit, async (c) => {
 
     // Fixed by audit 2026-03: timing-safe OTP comparison (was !== operator)
     if (!timingSafeCompare(verificationCode.code, code)) {
-      // Increment attempts
       await dbService.incrementVerificationAttempts(verificationCode.id);
+
+      await auditLogService.logFromContext(c, {
+        eventType: 'LOGIN_FAILURE',
+        metadata: { method: 'sms', reason: 'invalid_code', identifier: phone },
+      });
+
       return c.json({ error: 'Invalid verification code' }, 400);
     }
 
@@ -154,14 +162,24 @@ app.post('/verify', strictRateLimit, async (c) => {
     );
 
     // Store session
+    const deviceId = generateDeviceFingerprint(c);
     await dbService.createSession({
       id: sessionId,
       user_id: user.id,
       refresh_token: refreshToken,
+      token_family: randomUUID(),
+      token_version: 0,
       expires_at: Date.now() + 7 * 24 * 60 * 60 * 1000, // 7 days
       ip_address: c.req.header('x-forwarded-for') || c.req.header('x-real-ip'),
       user_agent: c.req.header('user-agent'),
+      device_id: deviceId,
       revoked: 0,
+    });
+
+    await auditLogService.logFromContext(c, {
+      userId: user.id,
+      eventType: 'LOGIN_SUCCESS',
+      metadata: { method: 'sms', deviceId },
     });
 
     return c.json({

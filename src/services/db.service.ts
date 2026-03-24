@@ -66,6 +66,8 @@ export interface Session {
   id: string;
   user_id: string;
   refresh_token: string;
+  token_family: string;
+  token_version: number;
   user_agent?: string;
   ip_address?: string;
   device_id?: string;
@@ -752,7 +754,9 @@ export class DatabaseService {
       data: {
         id: session.id,
         userId: session.user_id,
-        refreshToken: refreshTokenHash, // Store hash, not plaintext
+        refreshToken: refreshTokenHash,
+        tokenFamily: session.token_family,
+        tokenVersion: session.token_version,
         userAgent: session.user_agent,
         ipAddress: session.ip_address,
         deviceId: session.device_id,
@@ -762,19 +766,7 @@ export class DatabaseService {
       },
     });
 
-    return {
-      id: result.id,
-      user_id: result.userId,
-      refresh_token: result.refreshToken, // Returns hash (caller should keep original)
-      user_agent: result.userAgent ?? undefined,
-      ip_address: result.ipAddress ?? undefined,
-      device_id: result.deviceId ?? undefined,
-      expires_at: result.expiresAt.getTime(),
-      revoked: boolToInt(result.revoked),
-      revoked_at: dateToTimestamp(result.revokedAt),
-      created_at: result.createdAt.getTime(),
-      last_activity_at: result.lastActivityAt.getTime(),
-    };
+    return this.mapSessionResult(result);
   }
 
   async getSessionByRefreshToken(refreshToken: string): Promise<Session | null> {
@@ -789,39 +781,13 @@ export class DatabaseService {
     });
 
     if (!result) return null;
-
-    return {
-      id: result.id,
-      user_id: result.userId,
-      refresh_token: result.refreshToken,
-      user_agent: result.userAgent ?? undefined,
-      ip_address: result.ipAddress ?? undefined,
-      device_id: result.deviceId ?? undefined,
-      expires_at: result.expiresAt.getTime(),
-      revoked: boolToInt(result.revoked),
-      revoked_at: dateToTimestamp(result.revokedAt),
-      created_at: result.createdAt.getTime(),
-      last_activity_at: result.lastActivityAt.getTime(),
-    };
+    return this.mapSessionResult(result);
   }
 
   async getSessionById(id: string): Promise<Session | null> {
     const result = await this.prisma.authSession.findUnique({ where: { id } });
     if (!result) return null;
-
-    return {
-      id: result.id,
-      user_id: result.userId,
-      refresh_token: result.refreshToken,
-      user_agent: result.userAgent ?? undefined,
-      ip_address: result.ipAddress ?? undefined,
-      device_id: result.deviceId ?? undefined,
-      expires_at: result.expiresAt.getTime(),
-      revoked: boolToInt(result.revoked),
-      revoked_at: dateToTimestamp(result.revokedAt),
-      created_at: result.createdAt.getTime(),
-      last_activity_at: result.lastActivityAt.getTime(),
-    };
+    return this.mapSessionResult(result);
   }
 
   async revokeSession(id: string): Promise<void> {
@@ -834,6 +800,24 @@ export class DatabaseService {
     });
   }
 
+  async revokeTokenFamily(tokenFamily: string): Promise<number> {
+    const result = await this.prisma.authSession.updateMany({
+      where: {
+        tokenFamily,
+        revoked: false,
+      },
+      data: {
+        revoked: true,
+        revokedAt: new Date(),
+      },
+    });
+    return result.count;
+  }
+
+  verifyRefreshTokenHash(presentedToken: string, storedHash: string): boolean {
+    return verifyTokenHashInternal(presentedToken, storedHash);
+  }
+
   async rotateSessionRefreshToken(sessionId: string, newRefreshToken: string, newExpiresAt: number): Promise<void> {
     // SECURITY: Hash the new refresh token before storage
     const refreshTokenHash = hashTokenForStorage(newRefreshToken);
@@ -842,10 +826,29 @@ export class DatabaseService {
       where: { id: sessionId },
       data: {
         refreshToken: refreshTokenHash,
+        tokenVersion: { increment: 1 },
         expiresAt: new Date(newExpiresAt),
         lastActivityAt: new Date(),
       },
     });
+  }
+
+  private mapSessionResult(result: any): Session {
+    return {
+      id: result.id,
+      user_id: result.userId,
+      refresh_token: result.refreshToken,
+      token_family: result.tokenFamily,
+      token_version: result.tokenVersion,
+      user_agent: result.userAgent ?? undefined,
+      ip_address: result.ipAddress ?? undefined,
+      device_id: result.deviceId ?? undefined,
+      expires_at: result.expiresAt.getTime(),
+      revoked: boolToInt(result.revoked),
+      revoked_at: dateToTimestamp(result.revokedAt),
+      created_at: result.createdAt.getTime(),
+      last_activity_at: result.lastActivityAt.getTime(),
+    };
   }
 
   async updateSessionActivity(id: string): Promise<void> {
@@ -861,19 +864,7 @@ export class DatabaseService {
       orderBy: { createdAt: 'desc' },
     });
 
-    return results.map((result) => ({
-      id: result.id,
-      user_id: result.userId,
-      refresh_token: result.refreshToken,
-      user_agent: result.userAgent ?? undefined,
-      ip_address: result.ipAddress ?? undefined,
-      device_id: result.deviceId ?? undefined,
-      expires_at: result.expiresAt.getTime(),
-      revoked: boolToInt(result.revoked),
-      revoked_at: dateToTimestamp(result.revokedAt),
-      created_at: result.createdAt.getTime(),
-      last_activity_at: result.lastActivityAt.getTime(),
-    }));
+    return results.map((result) => this.mapSessionResult(result));
   }
 
   async revokeAllUserSessions(userId: string): Promise<void> {
@@ -3647,6 +3638,78 @@ export class DatabaseService {
         usdCostRaw: aggregation._sum.usdCostRaw ?? 0,
       },
     };
+  }
+
+  // ============================================
+  // AUDIT LOG METHODS
+  // ============================================
+
+  async createAuditLog(data: {
+    userId?: string;
+    eventType: string;
+    ipAddress?: string;
+    userAgent?: string;
+    metadata?: Record<string, unknown>;
+    riskScore?: number;
+  }): Promise<void> {
+    await this.prisma.authAuditLog.create({
+      data: {
+        userId: data.userId,
+        eventType: data.eventType as any,
+        ipAddress: data.ipAddress,
+        userAgent: data.userAgent,
+        metadata: data.metadata ?? {},
+        riskScore: data.riskScore ?? 0,
+      },
+    });
+  }
+
+  async getRecentLoginsByIp(ipAddress: string, windowMs: number): Promise<number> {
+    const since = new Date(Date.now() - windowMs);
+    return this.prisma.authAuditLog.count({
+      where: {
+        ipAddress,
+        eventType: { in: ['LOGIN_SUCCESS', 'LOGIN_FAILURE'] },
+        createdAt: { gte: since },
+      },
+    });
+  }
+
+  async getRecentFailuresByUserId(userId: string, windowMs: number): Promise<number> {
+    const since = new Date(Date.now() - windowMs);
+    return this.prisma.authAuditLog.count({
+      where: {
+        userId,
+        eventType: 'LOGIN_FAILURE',
+        createdAt: { gte: since },
+      },
+    });
+  }
+
+  async getUserKnownIps(userId: string): Promise<string[]> {
+    const logs = await this.prisma.authAuditLog.findMany({
+      where: {
+        userId,
+        eventType: 'LOGIN_SUCCESS',
+        ipAddress: { not: null },
+      },
+      select: { ipAddress: true },
+      distinct: ['ipAddress'],
+    });
+    return logs.map((l) => l.ipAddress).filter(Boolean) as string[];
+  }
+
+  async getUserKnownUserAgents(userId: string): Promise<string[]> {
+    const logs = await this.prisma.authAuditLog.findMany({
+      where: {
+        userId,
+        eventType: 'LOGIN_SUCCESS',
+        userAgent: { not: null },
+      },
+      select: { userAgent: true },
+      distinct: ['userAgent'],
+    });
+    return logs.map((l) => l.userAgent).filter(Boolean) as string[];
   }
 }
 

@@ -4,47 +4,78 @@ import { jwtService } from '../../services/jwt.service';
 import { refreshTokenSchema } from '../../utils/validators';
 import { authMiddleware, requireAuthUser } from '../../middleware/auth';
 import { standardRateLimit } from '../../middleware/ratelimit';
+import { auditLogService } from '../../services/auditLog.service';
+import { generateDeviceFingerprint } from '../../utils/fingerprint';
 
 const app = new Hono();
 
 /**
  * POST /auth/refresh
- * Refresh access token using refresh token
+ * Refresh access token using refresh token.
+ * Implements reuse detection: if a previously-rotated token is presented,
+ * the entire token family is revoked (all sessions sharing the same tokenFamily).
  */
 app.post('/refresh', standardRateLimit, async (c) => {
   try {
-    // Validate request body
     const body = await c.req.json();
     const { refreshToken } = refreshTokenSchema.parse(body);
 
-    // Verify refresh token
     const payload = jwtService.verifyRefreshToken(refreshToken);
 
-    // Check if session exists (including revoked sessions)
     const session = await dbService.getSessionById(payload.sessionId);
 
     if (!session) {
       return c.json({ error: 'Invalid refresh token' }, 401);
     }
 
-    // Check if session is revoked
     if (session.revoked) {
       return c.json({ error: 'Session has been revoked' }, 401);
     }
 
-    // Check if session is expired
     if (Date.now() > session.expires_at) {
       return c.json({ error: 'Session expired' }, 401);
     }
 
-    // Get user
+    // SECURITY: Verify the presented refresh token hash matches the stored hash.
+    // If it doesn't match, a previously-rotated token is being replayed — revoke the
+    // entire token family to invalidate all sessions derived from this lineage.
+    if (!dbService.verifyRefreshTokenHash(refreshToken, session.refresh_token)) {
+      const revokedCount = await dbService.revokeTokenFamily(session.token_family);
+      await auditLogService.logFromContext(c, {
+        userId: session.user_id,
+        eventType: 'TOKEN_REFRESH_REUSE',
+        metadata: {
+          sessionId: session.id,
+          tokenFamily: session.token_family,
+          revokedSessions: revokedCount,
+        },
+      });
+      return c.json({ error: 'Refresh token reuse detected — all sessions revoked' }, 401);
+    }
+
+    // Device fingerprint mismatch detection — log as suspicious but don't block
+    const currentDeviceId = generateDeviceFingerprint(c);
+    const deviceMismatch = session.device_id != null && session.device_id !== currentDeviceId;
+    if (deviceMismatch) {
+      await auditLogService.logFromContext(c, {
+        userId: session.user_id,
+        eventType: 'TOKEN_REFRESH',
+        riskScore: 60,
+        metadata: {
+          sessionId: session.id,
+          warning: 'device_mismatch',
+          originalDeviceId: session.device_id,
+          currentDeviceId,
+        },
+      });
+    }
+
     const user = await dbService.getUserById(payload.userId);
 
     if (!user) {
       return c.json({ error: 'User not found' }, 404);
     }
 
-    // Rotate refresh token (one-time use) + issue new access token for same session
     const newAccessToken = jwtService.generateAccessTokenForSession(
       user.id,
       payload.sessionId,
@@ -54,6 +85,14 @@ app.post('/refresh', standardRateLimit, async (c) => {
 
     const newExpiresAt = Date.now() + 7 * 24 * 60 * 60 * 1000; // 7 days
     await dbService.rotateSessionRefreshToken(payload.sessionId, newRefreshToken, newExpiresAt);
+
+    if (!deviceMismatch) {
+      await auditLogService.logFromContext(c, {
+        userId: user.id,
+        eventType: 'TOKEN_REFRESH',
+        metadata: { sessionId: payload.sessionId },
+      });
+    }
 
     return c.json({
       success: true,
@@ -89,16 +128,19 @@ app.post('/logout', authMiddleware, async (c) => {
   try {
     const user = requireAuthUser(c);
 
-    // Get refresh token from request body
     const body = await c.req.json();
     const { refreshToken } = body;
 
     if (refreshToken) {
-      // Find and revoke session
       const session = await dbService.getSessionByRefreshToken(refreshToken);
 
       if (session && session.user_id === user.userId) {
         await dbService.revokeSession(session.id);
+        await auditLogService.logFromContext(c, {
+          userId: user.userId,
+          eventType: 'SESSION_REVOKE',
+          metadata: { sessionId: session.id },
+        });
       }
     }
 
