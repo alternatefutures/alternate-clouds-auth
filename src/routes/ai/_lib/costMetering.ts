@@ -370,17 +370,25 @@ export async function checkBalance(
 export { checkBalance as checkCredits };
 
 /**
- * Get organization billing info from request headers
+ * Get organization billing info from request headers.
+ * If the authenticated token/session carries an organizationId claim,
+ * the X-Organization-Id header MUST match it — prevents a multi-org
+ * user from billing requests to a different org than their session scope.
  */
 export async function getOrgBillingFromRequest(c: Context): Promise<{
   orgBillingId: string;
   userId: string;
 } | null> {
   const orgId = c.req.header('X-Organization-Id');
-  const user = c.get('user') as { userId?: string } | undefined;
+  const user = c.get('user') as { userId?: string; organizationId?: string } | undefined;
   const userId = user?.userId;
 
   if (!orgId || !userId) {
+    return null;
+  }
+
+  // If the token was scoped to a specific org, the header must match
+  if (user?.organizationId && user.organizationId !== orgId) {
     return null;
   }
 
