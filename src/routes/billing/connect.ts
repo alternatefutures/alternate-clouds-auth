@@ -448,13 +448,33 @@ app.get('/transfers', async (c) => {
 
 /**
  * GET /billing/connect/balance
- * Get platform balance (admin only - for now just returns for authenticated user)
+ * Get platform balance — restricted to platform admins only
  */
 app.get('/balance', async (c) => {
   try {
-    const _user = requireAuthUser(c);
+    const user = requireAuthUser(c);
 
-    // Get balance from Stripe (primary provider)
+    // Platform admin check: user must be OWNER of at least one org
+    const orgs = await dbService.getOrganizationsByUserId(user.userId);
+    const isAdmin = orgs.some(async (org) => {
+      const member = await dbService.getOrganizationMember(org.id, user.userId);
+      return member?.role === 'OWNER';
+    });
+
+    // Stricter: check synchronously by loading membership for all orgs
+    let hasOwnerRole = false;
+    for (const org of orgs) {
+      const member = await dbService.getOrganizationMember(org.id, user.userId);
+      if (member?.role === 'OWNER') {
+        hasOwnerRole = true;
+        break;
+      }
+    }
+
+    if (!hasOwnerRole) {
+      return c.json({ error: 'Platform admin access required' }, 403);
+    }
+
     if (!isProviderAvailable('stripe')) {
       return c.json({ balances: [] });
     }

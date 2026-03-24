@@ -174,9 +174,12 @@ app.post('/', async (c) => {
 
     // If frontend specified an orgId, resolve that org's billing first
     if (data.orgId) {
-      const isMember = await dbService.isUserMemberOfOrganization(user.userId, data.orgId);
-      if (!isMember) {
+      const member = await dbService.getOrganizationMember(data.orgId, user.userId);
+      if (!member) {
         return c.json({ error: 'Not a member of this organization' }, 403);
+      }
+      if (member.role !== 'OWNER' && member.role !== 'ADMIN') {
+        return c.json({ error: 'OWNER or ADMIN role required for billing changes' }, 403);
       }
       const billing = await dbService.getOrganizationBillingByOrgId(data.orgId);
       if (billing) {

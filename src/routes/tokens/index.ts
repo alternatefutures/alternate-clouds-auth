@@ -187,14 +187,15 @@ const validateTokenSchema = z.object({
 
 app.post('/validate', standardRateLimit, async (c) => {
   try {
-    // Optional hardening: require an internal shared secret for introspection
+    // Fail closed: introspection secret MUST be configured
     const introspectionSecret = process.env.AUTH_INTROSPECTION_SECRET;
-    if (introspectionSecret) {
-      const provided = c.req.header('x-af-introspection-secret');
-      // SECURITY: Use timing-safe comparison to prevent timing attacks
-      if (!provided || !timingSafeCompare(provided, introspectionSecret)) {
-        return c.json({ valid: false, error: 'Unauthorized' }, 401);
-      }
+    if (!introspectionSecret) {
+      console.error('AUTH_INTROSPECTION_SECRET is not configured — refusing token validation');
+      return c.json({ valid: false, error: 'Service misconfigured' }, 500);
+    }
+    const provided = c.req.header('x-af-introspection-secret');
+    if (!provided || !timingSafeCompare(provided, introspectionSecret)) {
+      return c.json({ valid: false, error: 'Unauthorized' }, 401);
     }
 
     // Validate request body

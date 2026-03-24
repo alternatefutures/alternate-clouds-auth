@@ -53,19 +53,16 @@ app.post('/stripe', async (c) => {
       processed: 0,
     });
 
-    // Process event
+    // Process event — only mark processed on success, return non-2xx on failure
+    // so the provider retries transient errors
     try {
       await processStripeEvent(event);
       await dbService.markWebhookEventProcessed(dbRecord.id);
+      return c.json({ received: true });
     } catch (processError) {
       console.error('Stripe webhook processing error:', processError);
-      await dbService.markWebhookEventProcessed(
-        dbRecord.id,
-        processError instanceof Error ? processError.message : 'Unknown error'
-      );
+      return c.json({ error: 'Processing failed, will retry' }, 500);
     }
-
-    return c.json({ received: true });
   } catch (error) {
     console.error('Stripe webhook error:', error);
     return c.json({ error: 'Webhook processing failed' }, 500);
@@ -114,19 +111,15 @@ app.post('/stax', async (c) => {
       processed: 0,
     });
 
-    // Process event
+    // Process event — only mark processed on success
     try {
       await processStaxEvent(event);
       await dbService.markWebhookEventProcessed(dbRecord.id);
+      return c.json({ received: true });
     } catch (processError) {
       console.error('Stax webhook processing error:', processError);
-      await dbService.markWebhookEventProcessed(
-        dbRecord.id,
-        processError instanceof Error ? processError.message : 'Unknown error'
-      );
+      return c.json({ error: 'Processing failed, will retry' }, 500);
     }
-
-    return c.json({ received: true });
   } catch (error) {
     console.error('Stax webhook error:', error);
     return c.json({ error: 'Webhook processing failed' }, 500);
@@ -175,19 +168,15 @@ app.post('/relay', async (c) => {
       processed: 0,
     });
 
-    // Process event
+    // Process event — only mark processed on success
     try {
       await processRelayEvent(event);
       await dbService.markWebhookEventProcessed(dbRecord.id);
+      return c.json({ received: true });
     } catch (processError) {
       console.error('Relay webhook processing error:', processError);
-      await dbService.markWebhookEventProcessed(
-        dbRecord.id,
-        processError instanceof Error ? processError.message : 'Unknown error'
-      );
+      return c.json({ error: 'Processing failed, will retry' }, 500);
     }
-
-    return c.json({ received: true });
   } catch (error) {
     console.error('Relay webhook error:', error);
     return c.json({ error: 'Webhook processing failed' }, 500);

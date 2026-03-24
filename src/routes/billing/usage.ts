@@ -134,10 +134,20 @@ app.get('/history', async (c) => {
 
 /**
  * POST /billing/usage/record
- * Record a usage event (internal API - requires special auth)
+ * Record a usage event (internal service-to-service API)
  */
 app.post('/record', async (c) => {
   try {
+    // This is an internal endpoint — require service-to-service auth
+    const internalSecret = process.env.AUTH_INTROSPECTION_SECRET;
+    if (!internalSecret) {
+      return c.json({ error: 'Service misconfigured' }, 500);
+    }
+    const provided = c.req.header('x-af-introspection-secret');
+    if (!provided || provided !== internalSecret) {
+      return c.json({ error: 'Unauthorized — internal endpoint' }, 401);
+    }
+
     const user = requireAuthUser(c);
     const body = await c.req.json();
     const data = recordUsageSchema.parse(body);

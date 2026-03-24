@@ -291,7 +291,15 @@ app.post('/org/:orgId/topup/finalize', async (c) => {
       return c.json({ error: 'Payment intent not found' }, 404);
     }
 
-    if (paymentIntent.status !== 'succeeded' && paymentIntent.status !== 'processing') {
+    if (paymentIntent.status === 'processing') {
+      return c.json({
+        error: 'Payment is still processing. Credits will be applied once the payment settles.',
+        status: paymentIntent.status,
+        pending: true,
+      }, 202);
+    }
+
+    if (paymentIntent.status !== 'succeeded') {
       return c.json({ 
         error: 'Payment has not been completed', 
         status: paymentIntent.status 

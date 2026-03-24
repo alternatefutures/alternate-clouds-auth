@@ -237,7 +237,9 @@ app.post('/crypto/create', async (c) => {
 
 /**
  * POST /billing/payments/crypto/record
- * Record a completed crypto payment (manual or webhook)
+ * Record a crypto payment claim from the client.
+ * Payment is created as PENDING_VERIFICATION — invoice is NOT updated.
+ * Settlement happens only via provider webhook or server-side on-chain verification.
  */
 app.post('/crypto/record', async (c) => {
   try {
@@ -255,35 +257,29 @@ app.post('/crypto/record', async (c) => {
       return c.json({ error: 'Invoice not found' }, 404);
     }
 
+    if (invoice.status === 'PAID') {
+      return c.json({ error: 'Invoice already paid' }, 400);
+    }
+
     // Check if tx hash already recorded
     const existingPayment = await dbService.getPaymentByTxHash(data.txHash);
     if (existingPayment) {
       return c.json({ error: 'Transaction already recorded', paymentId: existingPayment.id }, 400);
     }
 
-    // Record payment
+    // Record payment as PENDING — do NOT mark as SUCCEEDED or update invoice.
+    // Only server-side verification (webhook or on-chain check) should settle.
     const payment = await dbService.createPayment({
       id: nanoid(),
       customer_id: customer.id,
       invoice_id: invoice.id,
       amount: data.amount,
       currency: invoice.currency,
-      status: 'SUCCEEDED', // Assuming verified on-chain
+      status: 'PENDING',
       provider: 'relay',
       tx_hash: data.txHash,
       blockchain: data.blockchain,
       from_address: data.fromAddress,
-    });
-
-    // Update invoice
-    const newAmountPaid = invoice.amount_paid + data.amount;
-    const newAmountDue = invoice.total - newAmountPaid;
-
-    await dbService.updateInvoice(invoice.id, {
-      amount_paid: newAmountPaid,
-      amount_due: newAmountDue,
-      status: newAmountDue <= 0 ? 'PAID' : 'OPEN',
-      paid_at: newAmountDue <= 0 ? Date.now() : undefined,
     });
 
     return c.json({
@@ -296,6 +292,7 @@ app.post('/crypto/record', async (c) => {
         invoiceId: payment.invoice_id,
         createdAt: payment.created_at,
       },
+      message: 'Payment recorded. It will be settled after on-chain verification.',
     });
   } catch (error) {
     console.error('Record crypto payment error:', error);
