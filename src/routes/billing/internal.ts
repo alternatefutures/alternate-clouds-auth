@@ -61,7 +61,7 @@ const escrowDepositSchema = z.object({
   amountCents: z.number().int().positive(),
   deploymentId: z.string().min(1), // AkashDeployment.id (for idempotency)
   description: z.string().optional(),
-  metadata: z.record(z.unknown()).optional(),
+  metadata: z.record(z.string(), z.unknown()).optional(),
 });
 
 const escrowRefundSchema = z.object({
@@ -70,7 +70,7 @@ const escrowRefundSchema = z.object({
   amountCents: z.number().int().positive(),
   deploymentId: z.string().min(1),
   description: z.string().optional(),
-  metadata: z.record(z.unknown()).optional(),
+  metadata: z.record(z.string(), z.unknown()).optional(),
 });
 
 const computeDebitSchema = z.object({
@@ -82,7 +82,7 @@ const computeDebitSchema = z.object({
   resource: z.string().min(1), // deployment ID or resource identifier
   description: z.string().optional(),
   idempotencyKey: z.string().min(1),
-  metadata: z.record(z.unknown()).optional(),
+  metadata: z.record(z.string(), z.unknown()).optional(),
 });
 
 const usageLogSchema = z.object({
@@ -107,7 +107,7 @@ const notifySchema = z.object({
   balanceCents: z.number().int().optional(),
   dailyCostCents: z.number().int().optional(),
   pausedServices: z.array(z.string()).optional(),
-  metadata: z.record(z.unknown()).optional(),
+  metadata: z.record(z.string(), z.unknown()).optional(),
 });
 
 // ============================================
