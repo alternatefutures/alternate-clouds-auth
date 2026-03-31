@@ -85,6 +85,20 @@ const computeDebitSchema = z.object({
   metadata: z.record(z.unknown()).optional(),
 });
 
+const usageLogSchema = z.object({
+  orgBillingId: z.string().min(1),
+  userId: z.string().optional(),
+  serviceType: z.string().min(1),
+  provider: z.string().min(1),
+  resource: z.string().min(1),
+  model: z.string().optional(),
+  usdCostRaw: z.number().nonnegative(),
+  marginRate: z.number().min(0),
+  usdCharged: z.number().nonnegative(),
+  requestId: z.string().min(1),
+  metadata: z.record(z.string(), z.unknown()).optional(),
+});
+
 const notifySchema = z.object({
   orgId: z.string().min(1),
   type: z.enum(['low_balance_pause', 'low_balance_warning', 'escrow_depleted']),
@@ -290,6 +304,49 @@ app.post('/compute-debit', async (c) => {
     if (errStack) console.error('[Internal Billing] Stack:', errStack);
     if (parsedData) console.error('[Internal Billing] Request data:', JSON.stringify(parsedData));
     return c.json({ error: 'Internal error', message: errMsg }, 500);
+  }
+});
+
+// ============================================
+// USAGE LOG — Record usage without debiting balance
+// ============================================
+
+/**
+ * POST /internal/billing/usage-log
+ *
+ * Records a normalized usage event for display/audit when the financial
+ * settlement already happened elsewhere (e.g. Akash escrow consumption).
+ */
+app.post('/usage-log', async (c) => {
+  try {
+    const body = await c.req.json();
+    const data = usageLogSchema.parse(body);
+
+    const result = await dbService.logOrgUsageIdempotent({
+      orgBillingId: data.orgBillingId,
+      userId: data.userId,
+      serviceType: data.serviceType,
+      provider: data.provider,
+      resource: data.resource,
+      model: data.model,
+      usdCostRaw: data.usdCostRaw,
+      marginRate: data.marginRate,
+      usdCharged: data.usdCharged,
+      requestId: data.requestId,
+      metadata: data.metadata,
+    });
+
+    return c.json({
+      success: true,
+      usageId: result.usageId,
+      alreadyProcessed: result.alreadyProcessed,
+    });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return c.json({ error: 'Invalid request', details: error.issues }, 400);
+    }
+    console.error('[Internal Billing] Usage log error:', error);
+    return c.json({ error: 'Internal error' }, 500);
   }
 });
 

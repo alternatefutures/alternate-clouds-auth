@@ -3517,6 +3517,39 @@ export class DatabaseService {
   }
 
   /**
+   * Idempotent wrapper for usage logging.
+   * Uses requestId as the stable dedupe key when callers may retry.
+   */
+  async logOrgUsageIdempotent(args: {
+    orgBillingId: string;
+    userId?: string | null;
+    serviceType: string;
+    provider: string;
+    resource: string;
+    model?: string;
+    usdCostRaw: number;
+    marginRate: number;
+    usdCharged: number;
+    requestId: string;
+    metadata?: Record<string, unknown>;
+  }): Promise<{ usageId: string; alreadyProcessed: boolean }> {
+    const existing = await this.prisma.organizationUsageLog.findFirst({
+      where: {
+        orgBillingId: args.orgBillingId,
+        requestId: args.requestId,
+      },
+      select: { id: true },
+    });
+
+    if (existing) {
+      return { usageId: existing.id, alreadyProcessed: true };
+    }
+
+    const result = await this.logOrgUsage(args);
+    return { usageId: result.usageId, alreadyProcessed: false };
+  }
+
+  /**
    * Get usage ledger entries for an org with pagination
    */
   async getOrgUsageLedger(args: {
