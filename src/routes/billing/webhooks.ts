@@ -274,24 +274,42 @@ async function processStripeEvent(event: WebhookEvent): Promise<void> {
       const subscription = await dbService.getSubscriptionByStripeId(subscriptionId);
       if (subscription) {
         const status = data.status as string;
-        const statusMap: Record<string, 'ACTIVE' | 'CANCELED' | 'PAST_DUE' | 'UNPAID' | 'TRIALING'> = {
+        const statusMap: Record<string, string> = {
           active: 'ACTIVE',
+          incomplete: 'INCOMPLETE',
+          incomplete_expired: 'CANCELED',
           canceled: 'CANCELED',
           past_due: 'PAST_DUE',
           unpaid: 'UNPAID',
           trialing: 'TRIALING',
+          paused: 'SUSPENDED',
         };
+        const mappedStatus = statusMap[status];
+        if (!mappedStatus) {
+          console.error(`Unknown Stripe subscription status: "${status}" for subscription ${subscriptionId}`);
+          break;
+        }
         const periodStart = data.current_period_start as number | undefined;
         const periodEnd = data.current_period_end as number | undefined;
         const cancelAt = data.cancel_at as number | undefined;
         const canceledAt = data.canceled_at as number | undefined;
-        await dbService.updateSubscription(subscription.id, {
-          status: (statusMap[status] || 'ACTIVE') as 'ACTIVE' | 'CANCELED' | 'PAST_DUE' | 'UNPAID' | 'TRIALING',
+
+        const updates: Record<string, unknown> = {
+          status: mappedStatus,
           current_period_start: periodStart ? periodStart * 1000 : undefined,
           current_period_end: periodEnd ? periodEnd * 1000 : undefined,
           cancel_at: cancelAt ? cancelAt * 1000 : undefined,
           canceled_at: canceledAt ? canceledAt * 1000 : undefined,
-        });
+        };
+
+        // When Stripe confirms payment (incomplete → active), mark trial as converted
+        if (mappedStatus === 'ACTIVE' && subscription.status === 'INCOMPLETE' && subscription.org_billing_id) {
+          await dbService.updateOrganizationBilling(subscription.org_billing_id, {
+            trial_converted: true,
+          });
+        }
+
+        await dbService.updateSubscription(subscription.id, updates);
       }
       break;
     }

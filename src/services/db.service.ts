@@ -210,7 +210,7 @@ export interface SubscriptionPlan {
   updated_at: number;
 }
 
-export type SubscriptionStatus = 'ACTIVE' | 'CANCELED' | 'PAST_DUE' | 'UNPAID' | 'TRIALING' | 'TRIAL_EXPIRED' | 'SUSPENDED';
+export type SubscriptionStatus = 'ACTIVE' | 'INCOMPLETE' | 'CANCELED' | 'PAST_DUE' | 'UNPAID' | 'TRIALING' | 'TRIAL_EXPIRED' | 'SUSPENDED';
 
 export interface Subscription {
   id: string;
@@ -2006,7 +2006,7 @@ export class DatabaseService {
     const result = await this.prisma.subscription.findFirst({
       where: {
         customerId,
-        status: 'ACTIVE',
+        status: { in: ['ACTIVE', 'INCOMPLETE'] },
       },
     });
 
@@ -2153,7 +2153,8 @@ export class DatabaseService {
   }
 
   /**
-   * Convert a trial/expired subscription to ACTIVE with new plan and period.
+   * Convert a trial/expired subscription to a new status with new plan and period.
+   * Use INCOMPLETE when payment is pending, ACTIVE when confirmed.
    */
   async convertSubscriptionToActive(subscriptionId: string, updates: {
     planId: string;
@@ -2161,13 +2162,14 @@ export class DatabaseService {
     stripeSubscriptionId?: string;
     currentPeriodStart: Date;
     currentPeriodEnd: Date;
+    status?: SubscriptionStatus;
   }): Promise<void> {
     await this.prisma.subscription.update({
       where: { id: subscriptionId },
       data: {
         planId: updates.planId,
         seats: updates.seats,
-        status: 'ACTIVE',
+        status: updates.status ?? 'ACTIVE',
         stripeSubscriptionId: updates.stripeSubscriptionId || null,
         currentPeriodStart: updates.currentPeriodStart,
         currentPeriodEnd: updates.currentPeriodEnd,
