@@ -143,6 +143,7 @@ export interface CreateSubscriptionInput {
   priceId: string;
   quantity?: number;
   trialPeriodDays?: number;
+  trialEnd?: number; // Unix timestamp (seconds) — overrides trialPeriodDays
   paymentMethodId?: string;
   metadata?: Record<string, string>;
   // Connect specific

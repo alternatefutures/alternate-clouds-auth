@@ -246,12 +246,17 @@ export class StripeProvider implements PaymentProvider {
     const params: Stripe.SubscriptionCreateParams = {
       customer: input.customerId,
       items: [{ price: input.priceId, quantity: input.quantity || 1 }],
-      trial_period_days: input.trialPeriodDays,
       metadata: input.metadata,
       payment_behavior: 'default_incomplete',
       payment_settings: { save_default_payment_method: 'on_subscription' },
-      expand: ['latest_invoice.payment_intent'],
+      expand: ['latest_invoice.payment_intent', 'pending_setup_intent'],
     };
+
+    if (input.trialEnd) {
+      params.trial_end = input.trialEnd;
+    } else if (input.trialPeriodDays) {
+      params.trial_period_days = input.trialPeriodDays;
+    }
 
     if (input.paymentMethodId) {
       params.default_payment_method = input.paymentMethodId;
@@ -261,11 +266,19 @@ export class StripeProvider implements PaymentProvider {
 
     const result = this.mapSubscription(subscription);
 
-    // Extract client_secret from the latest invoice's payment intent (for SCA/3DS)
-    const invoice = subscription.latest_invoice as Stripe.Invoice | null;
-    const pi = invoice?.payment_intent as Stripe.PaymentIntent | null;
-    if (pi?.client_secret) {
-      result.clientSecret = pi.client_secret;
+    // For trials: clientSecret comes from the pending SetupIntent (save card, charge later)
+    const setupIntent = subscription.pending_setup_intent as Stripe.SetupIntent | null;
+    if (setupIntent?.client_secret) {
+      result.clientSecret = setupIntent.client_secret;
+    }
+
+    // For immediate payment: clientSecret comes from the invoice's PaymentIntent
+    if (!result.clientSecret) {
+      const invoice = subscription.latest_invoice as Stripe.Invoice | null;
+      const pi = invoice?.payment_intent as Stripe.PaymentIntent | null;
+      if (pi?.client_secret) {
+        result.clientSecret = pi.client_secret;
+      }
     }
 
     return result;

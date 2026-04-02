@@ -302,8 +302,11 @@ async function processStripeEvent(event: WebhookEvent): Promise<void> {
           canceled_at: canceledAt ? canceledAt * 1000 : undefined,
         };
 
-        // When Stripe confirms payment (incomplete → active), mark trial as converted
-        if (mappedStatus === 'ACTIVE' && subscription.status === 'INCOMPLETE' && subscription.org_billing_id) {
+        // When payment is confirmed (incomplete→active) or trial ends and first charge
+        // succeeds (trialing→active), mark trial as converted
+        if (mappedStatus === 'ACTIVE'
+          && (subscription.status === 'INCOMPLETE' || subscription.status === 'TRIALING')
+          && subscription.org_billing_id) {
           await dbService.updateOrganizationBilling(subscription.org_billing_id, {
             trial_converted: true,
           });
