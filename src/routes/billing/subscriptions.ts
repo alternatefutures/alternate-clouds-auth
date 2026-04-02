@@ -142,16 +142,28 @@ app.post('/', async (c) => {
     const body = await c.req.json();
     const data = createSubscriptionSchema.parse(body);
 
-    const customer = await dbService.getBillingCustomerByUserId(user.userId);
+    let customer = await dbService.getBillingCustomerByUserId(user.userId);
     if (!customer) {
       return c.json({ error: 'Customer not found. Create customer first.' }, 404);
     }
 
-    // Check for existing ACTIVE subscription (truly active, not trial/suspended)
+    // Check for existing ACTIVE or INCOMPLETE subscription
     const existingActive = await dbService.getActiveSubscriptionByCustomerId(customer.id);
     if (existingActive) {
-      // If the active subscription has no org link (orphaned), cancel it so the user can resubscribe
-      if (!existingActive.org_billing_id) {
+      if (existingActive.status === 'INCOMPLETE') {
+        // Stale payment attempt — cancel the old Stripe sub and let them retry
+        if (existingActive.stripe_subscription_id) {
+          try {
+            const provider = getDefaultProvider();
+            if (provider.cancelSubscription) {
+              await provider.cancelSubscription(existingActive.stripe_subscription_id, { immediately: true });
+            }
+          } catch (cancelErr) {
+            console.error('Failed to cancel stale Stripe subscription:', cancelErr);
+          }
+        }
+        await dbService.updateSubscription(existingActive.id, { status: 'CANCELED', canceled_at: Date.now() });
+      } else if (!existingActive.org_billing_id) {
         await dbService.updateSubscription(existingActive.id, { status: 'CANCELED', canceled_at: Date.now() });
       } else {
         return c.json({ error: 'Already have an active subscription. Cancel it first.' }, 400);
@@ -208,6 +220,7 @@ app.post('/', async (c) => {
       }
     }
 
+    const isPaidPlan = plan.base_price_per_seat > 0;
     let stripeSubscriptionId: string | undefined;
     let clientSecret: string | undefined;
     const now = Date.now();
@@ -219,44 +232,78 @@ app.post('/', async (c) => {
       periodEnd.setMonth(periodEnd.getMonth() + 1);
     }
 
-    // Create Stripe subscription if plan has a price and customer has Stripe ID
-    if (plan.stripe_price_id && customer.stripe_customer_id) {
-      const provider = getDefaultProvider();
-      if (provider.createSubscription) {
-        const externalSub = await provider.createSubscription({
-          customerId: customer.stripe_customer_id,
-          priceId: plan.stripe_price_id,
-          quantity: data.seats,
-          paymentMethodId: data.paymentMethodId,
+    if (isPaidPlan) {
+      if (!plan.stripe_price_id) {
+        console.error(`Plan ${plan.name} (${plan.id}) has no stripe_price_id but base_price_per_seat=${plan.base_price_per_seat}`);
+        return c.json({ error: 'Plan is misconfigured — no payment price linked. Contact support.' }, 500);
+      }
+
+      // Auto-create Stripe customer if missing (same pattern as topup flow)
+      if (!customer.stripe_customer_id) {
+        const provider = getDefaultProvider();
+        const userData = await dbService.getUserById(user.userId);
+
+        const externalCustomer = await provider.createCustomer({
+          email: userData?.email || user.email || '',
+          name: userData?.display_name || undefined,
           metadata: { userId: user.userId },
         });
-        stripeSubscriptionId = externalSub.id;
-        clientSecret = externalSub.clientSecret;
+
+        await dbService.updateBillingCustomer(customer.id, {
+          stripe_customer_id: externalCustomer.id,
+        });
+
+        customer = (await dbService.getBillingCustomerByUserId(user.userId))!;
+      }
+
+      const provider = getDefaultProvider();
+      if (!provider.createSubscription) {
+        return c.json({ error: 'Payment provider does not support subscriptions' }, 500);
+      }
+
+      const externalSub = await provider.createSubscription({
+        customerId: customer.stripe_customer_id!,
+        priceId: plan.stripe_price_id,
+        quantity: data.seats,
+        paymentMethodId: data.paymentMethodId,
+        metadata: { userId: user.userId },
+      });
+
+      stripeSubscriptionId = externalSub.id;
+      clientSecret = externalSub.clientSecret;
+
+      if (!clientSecret) {
+        console.error(`Stripe subscription ${externalSub.id} returned no clientSecret — cannot collect payment`);
+        return c.json({ error: 'Payment setup failed. Please try again.' }, 500);
       }
     }
 
+    // For paid plans: INCOMPLETE until payment confirmed via webhook.
+    // For free plans ($0): ACTIVE immediately.
+    const initialStatus = isPaidPlan ? 'INCOMPLETE' : 'ACTIVE';
     let subscriptionResult;
 
     if (existingTrialSub && orgBillingId) {
-      // Convert existing trial subscription to ACTIVE
       await dbService.convertSubscriptionToActive(existingTrialSub.id, {
         planId: plan.id,
         seats: data.seats,
         stripeSubscriptionId,
         currentPeriodStart: new Date(now),
         currentPeriodEnd: periodEnd,
+        status: initialStatus,
       });
 
-      // Mark trial as converted
-      await dbService.updateOrganizationBilling(orgBillingId, {
-        trial_converted: true,
-      });
+      if (!isPaidPlan) {
+        await dbService.updateOrganizationBilling(orgBillingId, {
+          trial_converted: true,
+        });
+      }
 
       subscriptionResult = {
         id: existingTrialSub.id,
         plan: plan.name,
         billingInterval: plan.billing_interval,
-        status: 'ACTIVE',
+        status: initialStatus,
         seats: data.seats,
         basePricePerSeat: plan.base_price_per_seat,
         currentPeriodStart: now,
@@ -264,13 +311,12 @@ app.post('/', async (c) => {
         createdAt: existingTrialSub.created_at,
       };
     } else {
-      // Create new subscription
       const subscription = await dbService.createSubscription({
         id: nanoid(),
         customer_id: customer.id,
         org_billing_id: orgBillingId ?? undefined,
         plan_id: plan.id,
-        status: 'ACTIVE',
+        status: initialStatus,
         seats: data.seats,
         stripe_subscription_id: stripeSubscriptionId,
         current_period_start: now,
@@ -290,7 +336,7 @@ app.post('/', async (c) => {
       };
     }
 
-    // Create initial invoice for this billing period
+    // Create initial invoice — ALWAYS OPEN for paid plans (only PAID after confirmed payment)
     try {
       const subscriptionAmount = plan.base_price_per_seat * (data.seats || 1);
       const invoiceNumber = `INV-${customer.id.slice(0, 8).toUpperCase()}-${nanoid(6).toUpperCase()}`;
@@ -300,17 +346,17 @@ app.post('/', async (c) => {
         customer_id: customer.id,
         subscription_id: subscriptionResult.id,
         invoice_number: invoiceNumber,
-        status: clientSecret ? 'OPEN' : 'PAID',
+        status: isPaidPlan ? 'OPEN' : 'PAID',
         subtotal: subscriptionAmount,
         tax: 0,
         total: subscriptionAmount,
-        amount_paid: clientSecret ? 0 : subscriptionAmount,
-        amount_due: clientSecret ? subscriptionAmount : 0,
+        amount_paid: isPaidPlan ? 0 : subscriptionAmount,
+        amount_due: isPaidPlan ? subscriptionAmount : 0,
         currency: 'usd',
         period_start: subscriptionResult.currentPeriodStart,
         period_end: subscriptionResult.currentPeriodEnd,
         due_date: subscriptionResult.currentPeriodEnd,
-        paid_at: clientSecret ? undefined : now,
+        paid_at: isPaidPlan ? undefined : now,
       });
     } catch (invoiceErr) {
       console.error('Failed to create initial invoice (non-fatal):', invoiceErr);
@@ -413,7 +459,13 @@ app.put('/:id/seats', async (c) => {
       return c.json({ error: 'Subscription not found' }, 404);
     }
 
-    // Update in provider
+    const plan = await dbService.getSubscriptionPlanById(subscription.plan_id);
+    const isPaid = plan && plan.base_price_per_seat > 0;
+
+    if (isPaid && !subscription.stripe_subscription_id) {
+      return c.json({ error: 'Cannot update seats — subscription has no active payment link' }, 400);
+    }
+
     if (subscription.stripe_subscription_id) {
       const provider = getDefaultProvider();
       if (provider.updateSubscription) {
@@ -423,11 +475,9 @@ app.put('/:id/seats', async (c) => {
       }
     }
 
-    // Update in database
     await dbService.updateSubscription(subscriptionId, { seats: data.seats });
 
     const updatedSubscription = await dbService.getSubscriptionById(subscriptionId);
-    const plan = await dbService.getSubscriptionPlanById(subscription.plan_id);
 
     return c.json({
       subscription: {
