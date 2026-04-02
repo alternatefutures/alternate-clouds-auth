@@ -13,6 +13,7 @@ import { z } from 'zod';
 import { authMiddleware, requireAuthUser } from '../../middleware/auth';
 import { dbService, SubscriptionPlan } from '../../services/db.service';
 import { getDefaultProvider } from '../../services/payments';
+import type { CreateSubscriptionInput } from '../../services/payments/types';
 
 const app = new Hono();
 
@@ -221,6 +222,10 @@ app.post('/', async (c) => {
     }
 
     const isPaidPlan = plan.base_price_per_seat > 0;
+    const isActiveTrial = existingTrialSub?.status === 'TRIALING'
+      && existingTrialSub.trial_end
+      && existingTrialSub.trial_end > Date.now();
+
     let stripeSubscriptionId: string | undefined;
     let clientSecret: string | undefined;
     const now = Date.now();
@@ -256,47 +261,81 @@ app.post('/', async (c) => {
         customer = (await dbService.getBillingCustomerByUserId(user.userId))!;
       }
 
+      // If retrying during trial and a stale Stripe sub exists, cancel it first
+      if (isActiveTrial && existingTrialSub!.stripe_subscription_id) {
+        try {
+          const provider = getDefaultProvider();
+          if (provider.cancelSubscription) {
+            await provider.cancelSubscription(existingTrialSub!.stripe_subscription_id, { immediately: true });
+          }
+        } catch (cancelErr) {
+          console.error('Failed to cancel stale Stripe subscription on trial retry:', cancelErr);
+        }
+      }
+
       const provider = getDefaultProvider();
       if (!provider.createSubscription) {
         return c.json({ error: 'Payment provider does not support subscriptions' }, 500);
       }
 
-      const externalSub = await provider.createSubscription({
+      const createSubInput: CreateSubscriptionInput = {
         customerId: customer.stripe_customer_id!,
         priceId: plan.stripe_price_id,
         quantity: data.seats,
         paymentMethodId: data.paymentMethodId,
         metadata: { userId: user.userId },
-      });
+      };
 
+      // Active trial: pass trial_end → Stripe creates SetupIntent (save card, charge later)
+      // Post-trial or no trial: Stripe creates PaymentIntent (charge now)
+      if (isActiveTrial) {
+        createSubInput.trialEnd = Math.floor(existingTrialSub!.trial_end! / 1000);
+      }
+
+      const externalSub = await provider.createSubscription(createSubInput);
       stripeSubscriptionId = externalSub.id;
       clientSecret = externalSub.clientSecret;
 
       if (!clientSecret) {
-        console.error(`Stripe subscription ${externalSub.id} returned no clientSecret — cannot collect payment`);
+        console.error(`Stripe subscription ${externalSub.id} returned no clientSecret — cannot collect payment/setup`);
         return c.json({ error: 'Payment setup failed. Please try again.' }, 500);
       }
     }
 
-    // For paid plans: INCOMPLETE until payment confirmed via webhook.
-    // For free plans ($0): ACTIVE immediately.
-    const initialStatus = isPaidPlan ? 'INCOMPLETE' : 'ACTIVE';
+    // Active trial + paid: stay TRIALING (Stripe transitions to active after trial ends)
+    // Post-trial + paid: INCOMPLETE until payment confirmed via webhook
+    // Free plan: ACTIVE immediately
+    const initialStatus = isActiveTrial ? 'TRIALING' : (isPaidPlan ? 'INCOMPLETE' : 'ACTIVE');
     let subscriptionResult;
 
     if (existingTrialSub && orgBillingId) {
-      await dbService.convertSubscriptionToActive(existingTrialSub.id, {
-        planId: plan.id,
-        seats: data.seats,
-        stripeSubscriptionId,
-        currentPeriodStart: new Date(now),
-        currentPeriodEnd: periodEnd,
-        status: initialStatus,
-      });
-
-      if (!isPaidPlan) {
-        await dbService.updateOrganizationBilling(orgBillingId, {
-          trial_converted: true,
+      if (isActiveTrial) {
+        // Mid-trial: keep existing period dates and trialEnd, just link Stripe subscription
+        await dbService.convertSubscriptionToActive(existingTrialSub.id, {
+          planId: plan.id,
+          seats: data.seats,
+          stripeSubscriptionId,
+          currentPeriodStart: new Date(existingTrialSub.current_period_start),
+          currentPeriodEnd: new Date(existingTrialSub.current_period_end),
+          status: 'TRIALING',
+          trialEnd: new Date(existingTrialSub.trial_end!),
         });
+      } else {
+        // Post-trial: start new billing period
+        await dbService.convertSubscriptionToActive(existingTrialSub.id, {
+          planId: plan.id,
+          seats: data.seats,
+          stripeSubscriptionId,
+          currentPeriodStart: new Date(now),
+          currentPeriodEnd: periodEnd,
+          status: initialStatus,
+        });
+
+        if (!isPaidPlan) {
+          await dbService.updateOrganizationBilling(orgBillingId, {
+            trial_converted: true,
+          });
+        }
       }
 
       subscriptionResult = {
@@ -306,8 +345,9 @@ app.post('/', async (c) => {
         status: initialStatus,
         seats: data.seats,
         basePricePerSeat: plan.base_price_per_seat,
-        currentPeriodStart: now,
-        currentPeriodEnd: periodEnd.getTime(),
+        currentPeriodStart: isActiveTrial ? existingTrialSub.current_period_start : now,
+        currentPeriodEnd: isActiveTrial ? existingTrialSub.current_period_end : periodEnd.getTime(),
+        trialEnd: isActiveTrial ? existingTrialSub.trial_end : undefined,
         createdAt: existingTrialSub.created_at,
       };
     } else {
@@ -336,35 +376,39 @@ app.post('/', async (c) => {
       };
     }
 
-    // Create initial invoice — ALWAYS OPEN for paid plans (only PAID after confirmed payment)
-    try {
-      const subscriptionAmount = plan.base_price_per_seat * (data.seats || 1);
-      const invoiceNumber = `INV-${customer.id.slice(0, 8).toUpperCase()}-${nanoid(6).toUpperCase()}`;
+    // Skip invoice for active trial — Stripe creates the invoice when trial ends.
+    // For immediate payment or free plans, create a local invoice now.
+    if (!isActiveTrial) {
+      try {
+        const subscriptionAmount = plan.base_price_per_seat * (data.seats || 1);
+        const invoiceNumber = `INV-${customer.id.slice(0, 8).toUpperCase()}-${nanoid(6).toUpperCase()}`;
 
-      await dbService.createInvoice({
-        id: nanoid(),
-        customer_id: customer.id,
-        subscription_id: subscriptionResult.id,
-        invoice_number: invoiceNumber,
-        status: isPaidPlan ? 'OPEN' : 'PAID',
-        subtotal: subscriptionAmount,
-        tax: 0,
-        total: subscriptionAmount,
-        amount_paid: isPaidPlan ? 0 : subscriptionAmount,
-        amount_due: isPaidPlan ? subscriptionAmount : 0,
-        currency: 'usd',
-        period_start: subscriptionResult.currentPeriodStart,
-        period_end: subscriptionResult.currentPeriodEnd,
-        due_date: subscriptionResult.currentPeriodEnd,
-        paid_at: isPaidPlan ? undefined : now,
-      });
-    } catch (invoiceErr) {
-      console.error('Failed to create initial invoice (non-fatal):', invoiceErr);
+        await dbService.createInvoice({
+          id: nanoid(),
+          customer_id: customer.id,
+          subscription_id: subscriptionResult.id,
+          invoice_number: invoiceNumber,
+          status: isPaidPlan ? 'OPEN' : 'PAID',
+          subtotal: subscriptionAmount,
+          tax: 0,
+          total: subscriptionAmount,
+          amount_paid: isPaidPlan ? 0 : subscriptionAmount,
+          amount_due: isPaidPlan ? subscriptionAmount : 0,
+          currency: 'usd',
+          period_start: subscriptionResult.currentPeriodStart,
+          period_end: subscriptionResult.currentPeriodEnd,
+          due_date: subscriptionResult.currentPeriodEnd,
+          paid_at: isPaidPlan ? undefined : now,
+        });
+      } catch (invoiceErr) {
+        console.error('Failed to create initial invoice (non-fatal):', invoiceErr);
+      }
     }
 
     return c.json({
       subscription: subscriptionResult,
       ...(clientSecret ? { clientSecret } : {}),
+      ...(isActiveTrial ? { isTrialSetup: true, trialEnd: existingTrialSub!.trial_end } : {}),
     });
   } catch (error) {
     console.error('Create subscription error:', error);

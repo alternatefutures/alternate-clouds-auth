@@ -2155,6 +2155,8 @@ export class DatabaseService {
   /**
    * Convert a trial/expired subscription to a new status with new plan and period.
    * Use INCOMPLETE when payment is pending, ACTIVE when confirmed.
+   * Pass trialEnd to preserve the trial end date (mid-trial subscription setup).
+   * Omit trialEnd to clear it (post-trial conversion).
    */
   async convertSubscriptionToActive(subscriptionId: string, updates: {
     planId: string;
@@ -2163,6 +2165,7 @@ export class DatabaseService {
     currentPeriodStart: Date;
     currentPeriodEnd: Date;
     status?: SubscriptionStatus;
+    trialEnd?: Date | null;
   }): Promise<void> {
     await this.prisma.subscription.update({
       where: { id: subscriptionId },
@@ -2173,7 +2176,7 @@ export class DatabaseService {
         stripeSubscriptionId: updates.stripeSubscriptionId || null,
         currentPeriodStart: updates.currentPeriodStart,
         currentPeriodEnd: updates.currentPeriodEnd,
-        trialEnd: null,
+        trialEnd: updates.trialEnd ?? null,
       },
     });
   }
