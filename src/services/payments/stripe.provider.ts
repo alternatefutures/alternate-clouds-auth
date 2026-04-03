@@ -19,6 +19,8 @@ import type {
   CreateSubscriptionInput,
   CancelSubscriptionInput,
   CreateRefundInput,
+  CreateCheckoutSessionInput,
+  CheckoutSession,
   WebhookEvent,
   ConnectedAccount,
   CreateConnectedAccountInput,
@@ -327,6 +329,67 @@ export class StripeProvider implements PaymentProvider {
     }
 
     return this.mapSubscription(subscription);
+  }
+
+  // Checkout Sessions
+  async createCheckoutSession(input: CreateCheckoutSessionInput): Promise<CheckoutSession> {
+    const params: Stripe.Checkout.SessionCreateParams = {
+      customer: input.customerId,
+      success_url: input.successUrl,
+      cancel_url: input.cancelUrl,
+      metadata: input.metadata,
+    };
+
+    if (input.mode === 'subscription') {
+      params.mode = 'subscription';
+      params.line_items = [{
+        price: input.priceId!,
+        quantity: input.quantity || 1,
+      }];
+      if (input.trialEnd) {
+        params.subscription_data = {
+          trial_end: input.trialEnd,
+          metadata: input.metadata,
+        };
+      }
+    } else {
+      params.mode = 'payment';
+      params.line_items = [{
+        price_data: {
+          currency: input.currency || 'usd',
+          unit_amount: input.amount!,
+          product_data: { name: 'Credits Top-up' },
+        },
+        quantity: 1,
+      }];
+    }
+
+    const session = await this.stripe.checkout.sessions.create(params);
+
+    if (!session.url) {
+      throw new Error('Stripe Checkout session created without a URL');
+    }
+
+    return { id: session.id, url: session.url };
+  }
+
+  async retrieveCheckoutSession(sessionId: string): Promise<{
+    id: string;
+    mode: string;
+    status: string | null;
+    subscription: string | null;
+    metadata: Record<string, string>;
+  }> {
+    const session = await this.stripe.checkout.sessions.retrieve(sessionId);
+    return {
+      id: session.id,
+      mode: session.mode ?? 'subscription',
+      status: session.status,
+      subscription: typeof session.subscription === 'string'
+        ? session.subscription
+        : (session.subscription as Stripe.Subscription)?.id ?? null,
+      metadata: (session.metadata ?? {}) as Record<string, string>,
+    };
   }
 
   private mapSubscription(sub: Stripe.Subscription): ExternalSubscription {

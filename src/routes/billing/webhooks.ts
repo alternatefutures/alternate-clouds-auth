@@ -423,6 +423,113 @@ async function processStripeEvent(event: WebhookEvent): Promise<void> {
       break;
     }
 
+    case 'checkout.session.completed': {
+      const session = data as Record<string, unknown>;
+      const sessionMetadata = session.metadata as Record<string, string> | undefined;
+      const mode = session.mode as string;
+
+      if (mode === 'subscription' && sessionMetadata?.type === 'subscription') {
+        const stripeSubscriptionId = session.subscription as string;
+        const userId = sessionMetadata.userId;
+        const orgId = sessionMetadata.orgId;
+        const planId = sessionMetadata.planId;
+        const seats = parseInt(sessionMetadata.seats || '1', 10);
+
+        if (!stripeSubscriptionId || !userId || !planId) {
+          console.error('checkout.session.completed: missing subscription/userId/planId in metadata');
+          break;
+        }
+
+        const customer = await dbService.getBillingCustomerByUserId(userId);
+        if (!customer) {
+          console.error(`checkout.session.completed: no billing customer for userId=${userId}`);
+          break;
+        }
+
+        const plan = await dbService.getSubscriptionPlanById(planId);
+        if (!plan) {
+          console.error(`checkout.session.completed: plan not found planId=${planId}`);
+          break;
+        }
+
+        // Find existing trial subscription for this org
+        let existingSub: Awaited<ReturnType<typeof dbService.getSubscriptionByOrgBillingId>> | null = null;
+        let orgBillingId: string | undefined;
+
+        if (orgId) {
+          const billing = await dbService.getOrganizationBillingByOrgId(orgId);
+          if (billing) {
+            orgBillingId = billing.id;
+            existingSub = await dbService.getSubscriptionByOrgBillingId(billing.id);
+          }
+        }
+
+        const now = Date.now();
+
+        if (existingSub) {
+          const isActiveTrial = existingSub.status === 'TRIALING'
+            && existingSub.trial_end
+            && existingSub.trial_end > now;
+
+          if (isActiveTrial) {
+            // Mid-trial checkout: link Stripe sub, update plan, keep TRIALING
+            await dbService.updateSubscription(existingSub.id, {
+              stripe_subscription_id: stripeSubscriptionId,
+              plan_id: planId,
+              seats,
+              status: 'TRIALING',
+            });
+          } else {
+            // Post-trial: activate immediately
+            const periodEnd = new Date(now);
+            if (plan.billing_interval === 'YEARLY') {
+              periodEnd.setFullYear(periodEnd.getFullYear() + 1);
+            } else {
+              periodEnd.setMonth(periodEnd.getMonth() + 1);
+            }
+
+            await dbService.convertSubscriptionToActive(existingSub.id, {
+              planId,
+              seats,
+              stripeSubscriptionId,
+              currentPeriodStart: new Date(now),
+              currentPeriodEnd: periodEnd,
+              status: 'ACTIVE',
+            });
+
+            if (orgBillingId) {
+              await dbService.updateOrganizationBilling(orgBillingId, {
+                trial_converted: true,
+              });
+            }
+          }
+        } else {
+          // No existing subscription — create new
+          const periodEnd = new Date(now);
+          if (plan.billing_interval === 'YEARLY') {
+            periodEnd.setFullYear(periodEnd.getFullYear() + 1);
+          } else {
+            periodEnd.setMonth(periodEnd.getMonth() + 1);
+          }
+
+          await dbService.createSubscription({
+            id: nanoid(),
+            customer_id: customer.id,
+            org_billing_id: orgBillingId,
+            plan_id: planId,
+            status: 'ACTIVE',
+            seats,
+            stripe_subscription_id: stripeSubscriptionId,
+            current_period_start: now,
+            current_period_end: periodEnd.getTime(),
+          });
+        }
+
+        console.log(`Checkout completed: subscription ${stripeSubscriptionId} for user ${userId}, plan ${plan.name}`);
+      }
+      break;
+    }
+
     case 'account.updated': {
       // Handle connected account updates
       const accountId = data.id as string;
