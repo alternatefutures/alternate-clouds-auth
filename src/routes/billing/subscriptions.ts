@@ -13,7 +13,7 @@ import { z } from 'zod';
 import { authMiddleware, requireAuthUser } from '../../middleware/auth';
 import { dbService, SubscriptionPlan } from '../../services/db.service';
 import { getDefaultProvider } from '../../services/payments';
-import type { CreateSubscriptionInput } from '../../services/payments/types';
+import type { CreateSubscriptionInput, CreateCheckoutSessionInput } from '../../services/payments/types';
 
 const app = new Hono();
 
@@ -302,40 +302,25 @@ app.post('/', async (c) => {
       }
     }
 
-    // Active trial + paid: stay TRIALING (Stripe transitions to active after trial ends)
     // Post-trial + paid: INCOMPLETE until payment confirmed via webhook
     // Free plan: ACTIVE immediately
-    const initialStatus = isActiveTrial ? 'TRIALING' : (isPaidPlan ? 'INCOMPLETE' : 'ACTIVE');
+    const initialStatus = isPaidPlan ? 'INCOMPLETE' : 'ACTIVE';
     let subscriptionResult;
 
     if (existingTrialSub && orgBillingId) {
-      if (isActiveTrial) {
-        // Mid-trial: keep existing period dates and trialEnd, just link Stripe subscription
-        await dbService.convertSubscriptionToActive(existingTrialSub.id, {
-          planId: plan.id,
-          seats: data.seats,
-          stripeSubscriptionId,
-          currentPeriodStart: new Date(existingTrialSub.current_period_start),
-          currentPeriodEnd: new Date(existingTrialSub.current_period_end),
-          status: 'TRIALING',
-          trialEnd: new Date(existingTrialSub.trial_end!),
-        });
-      } else {
-        // Post-trial: start new billing period
-        await dbService.convertSubscriptionToActive(existingTrialSub.id, {
-          planId: plan.id,
-          seats: data.seats,
-          stripeSubscriptionId,
-          currentPeriodStart: new Date(now),
-          currentPeriodEnd: periodEnd,
-          status: initialStatus,
-        });
+      await dbService.convertSubscriptionToActive(existingTrialSub.id, {
+        planId: plan.id,
+        seats: data.seats,
+        stripeSubscriptionId,
+        currentPeriodStart: new Date(now),
+        currentPeriodEnd: periodEnd,
+        status: initialStatus,
+      });
 
-        if (!isPaidPlan) {
-          await dbService.updateOrganizationBilling(orgBillingId, {
-            trial_converted: true,
-          });
-        }
+      if (!isPaidPlan) {
+        await dbService.updateOrganizationBilling(orgBillingId, {
+          trial_converted: true,
+        });
       }
 
       subscriptionResult = {
@@ -345,9 +330,8 @@ app.post('/', async (c) => {
         status: initialStatus,
         seats: data.seats,
         basePricePerSeat: plan.base_price_per_seat,
-        currentPeriodStart: isActiveTrial ? existingTrialSub.current_period_start : now,
-        currentPeriodEnd: isActiveTrial ? existingTrialSub.current_period_end : periodEnd.getTime(),
-        trialEnd: isActiveTrial ? existingTrialSub.trial_end : undefined,
+        currentPeriodStart: now,
+        currentPeriodEnd: periodEnd.getTime(),
         createdAt: existingTrialSub.created_at,
       };
     } else {
@@ -376,39 +360,34 @@ app.post('/', async (c) => {
       };
     }
 
-    // Skip invoice for active trial — Stripe creates the invoice when trial ends.
-    // For immediate payment or free plans, create a local invoice now.
-    if (!isActiveTrial) {
-      try {
-        const subscriptionAmount = plan.base_price_per_seat * (data.seats || 1);
-        const invoiceNumber = `INV-${customer.id.slice(0, 8).toUpperCase()}-${nanoid(6).toUpperCase()}`;
+    try {
+      const subscriptionAmount = plan.base_price_per_seat * (data.seats || 1);
+      const invoiceNumber = `INV-${customer.id.slice(0, 8).toUpperCase()}-${nanoid(6).toUpperCase()}`;
 
-        await dbService.createInvoice({
-          id: nanoid(),
-          customer_id: customer.id,
-          subscription_id: subscriptionResult.id,
-          invoice_number: invoiceNumber,
-          status: isPaidPlan ? 'OPEN' : 'PAID',
-          subtotal: subscriptionAmount,
-          tax: 0,
-          total: subscriptionAmount,
-          amount_paid: isPaidPlan ? 0 : subscriptionAmount,
-          amount_due: isPaidPlan ? subscriptionAmount : 0,
-          currency: 'usd',
-          period_start: subscriptionResult.currentPeriodStart,
-          period_end: subscriptionResult.currentPeriodEnd,
-          due_date: subscriptionResult.currentPeriodEnd,
-          paid_at: isPaidPlan ? undefined : now,
-        });
-      } catch (invoiceErr) {
-        console.error('Failed to create initial invoice (non-fatal):', invoiceErr);
-      }
+      await dbService.createInvoice({
+        id: nanoid(),
+        customer_id: customer.id,
+        subscription_id: subscriptionResult.id,
+        invoice_number: invoiceNumber,
+        status: isPaidPlan ? 'OPEN' : 'PAID',
+        subtotal: subscriptionAmount,
+        tax: 0,
+        total: subscriptionAmount,
+        amount_paid: isPaidPlan ? 0 : subscriptionAmount,
+        amount_due: isPaidPlan ? subscriptionAmount : 0,
+        currency: 'usd',
+        period_start: subscriptionResult.currentPeriodStart,
+        period_end: subscriptionResult.currentPeriodEnd,
+        due_date: subscriptionResult.currentPeriodEnd,
+        paid_at: isPaidPlan ? undefined : now,
+      });
+    } catch (invoiceErr) {
+      console.error('Failed to create initial invoice (non-fatal):', invoiceErr);
     }
 
     return c.json({
       subscription: subscriptionResult,
       ...(clientSecret ? { clientSecret } : {}),
-      ...(isActiveTrial ? { isTrialSetup: true, trialEnd: existingTrialSub!.trial_end } : {}),
     });
   } catch (error) {
     console.error('Create subscription error:', error);
@@ -420,6 +399,7 @@ app.post('/', async (c) => {
     return c.json({ error: 'Failed to create subscription' }, 500);
   }
 });
+
 
 /**
  * POST /billing/subscriptions/:id/cancel
@@ -607,6 +587,7 @@ app.get('/org/:orgId', async (c) => {
         cancelAt: subscription.cancel_at,
         trialEnd: subscription.trial_end,
         createdAt: subscription.created_at,
+        hasPaymentLinked: subscription.stripe_subscription_id != null,
       },
       trial: {
         startedAt: orgBilling.trial_started_at,
@@ -623,6 +604,223 @@ app.get('/org/:orgId', async (c) => {
   } catch (error) {
     console.error('Get org subscription error:', error);
     return c.json({ error: 'Failed to get organization subscription' }, 500);
+  }
+});
+
+/**
+ * POST /billing/subscriptions/checkout
+ * Create a Stripe Checkout session for subscribing to a plan.
+ * Redirects user to checkout.stripe.com — no card data touches our servers.
+ */
+app.post('/checkout', async (c) => {
+  try {
+    const user = requireAuthUser(c);
+    const body = await c.req.json();
+    const { planId, seats = 1, orgId, successUrl, cancelUrl } = body;
+
+    if (!planId || !successUrl || !cancelUrl) {
+      return c.json({ error: 'Missing planId, successUrl, or cancelUrl' }, 400);
+    }
+
+    const plan = await dbService.getSubscriptionPlanById(planId);
+    if (!plan || !plan.is_active) {
+      return c.json({ error: 'Plan not found or inactive' }, 404);
+    }
+
+    if (!plan.stripe_price_id) {
+      return c.json({ error: 'Plan is misconfigured — no Stripe price linked' }, 500);
+    }
+
+    let customer = await dbService.getBillingCustomerByUserId(user.userId);
+    if (!customer) {
+      return c.json({ error: 'No billing customer found' }, 404);
+    }
+
+    // Auto-create Stripe customer if missing
+    if (!customer.stripe_customer_id) {
+      const provider = getDefaultProvider();
+      const userData = await dbService.getUserById(user.userId);
+      const externalCustomer = await provider.createCustomer({
+        email: userData?.email || user.email || '',
+        name: userData?.display_name || undefined,
+        metadata: { userId: user.userId },
+      });
+      await dbService.updateBillingCustomer(customer.id, {
+        stripe_customer_id: externalCustomer.id,
+      });
+      customer = (await dbService.getBillingCustomerByUserId(user.userId))!;
+    }
+
+    // Check for active trial
+    let trialEnd: number | undefined;
+    if (orgId) {
+      const billing = await dbService.getOrganizationBillingByOrgId(orgId);
+      if (billing) {
+        const sub = await dbService.getSubscriptionByOrgBillingId(billing.id);
+        if (sub?.status === 'TRIALING' && sub.trial_end && sub.trial_end > Date.now()) {
+          trialEnd = Math.floor(sub.trial_end / 1000);
+        }
+      }
+    }
+
+    const provider = getDefaultProvider();
+    if (!provider.createCheckoutSession) {
+      return c.json({ error: 'Payment provider does not support Checkout' }, 500);
+    }
+
+    const session = await provider.createCheckoutSession({
+      mode: 'subscription',
+      customerId: customer.stripe_customer_id!,
+      priceId: plan.stripe_price_id,
+      quantity: seats,
+      successUrl,
+      cancelUrl,
+      trialEnd,
+      metadata: {
+        type: 'subscription',
+        userId: user.userId,
+        orgId: orgId || '',
+        planId,
+        seats: String(seats),
+      },
+    });
+
+    return c.json({ url: session.url, sessionId: session.id });
+  } catch (error) {
+    console.error('Create checkout session error:', error);
+    return c.json({ error: 'Failed to create checkout session' }, 500);
+  }
+});
+
+/**
+ * POST /billing/subscriptions/checkout/confirm
+ * Confirm a Stripe Checkout session on return from Stripe.
+ * Fallback for when webhooks haven't arrived yet (always the case in local dev).
+ * Retrieves the session from Stripe and applies the same logic as checkout.session.completed.
+ */
+app.post('/checkout/confirm', async (c) => {
+  try {
+    const user = requireAuthUser(c);
+    const { sessionId } = await c.req.json();
+
+    if (!sessionId) {
+      return c.json({ error: 'Missing sessionId' }, 400);
+    }
+
+    const provider = getDefaultProvider();
+    if (!(provider as any).retrieveCheckoutSession) {
+      return c.json({ error: 'Provider does not support session retrieval' }, 500);
+    }
+
+    const session = await (provider as any).retrieveCheckoutSession(sessionId);
+
+    if (session.status !== 'complete') {
+      return c.json({ error: 'Checkout session not completed', status: session.status }, 400);
+    }
+
+    const metadata = session.metadata || {};
+    if (metadata.type !== 'subscription' || session.mode !== 'subscription') {
+      return c.json({ error: 'Not a subscription checkout session' }, 400);
+    }
+
+    const stripeSubscriptionId = session.subscription;
+    const planId = metadata.planId;
+    const orgId = metadata.orgId;
+    const seats = parseInt(metadata.seats || '1', 10);
+
+    if (!stripeSubscriptionId || !planId) {
+      return c.json({ error: 'Missing subscription or plan in session' }, 400);
+    }
+
+    const plan = await dbService.getSubscriptionPlanById(planId);
+    if (!plan) {
+      return c.json({ error: 'Plan not found' }, 404);
+    }
+
+    const customer = await dbService.getBillingCustomerByUserId(user.userId);
+    if (!customer) {
+      return c.json({ error: 'Billing customer not found' }, 404);
+    }
+
+    let existingSub: Awaited<ReturnType<typeof dbService.getSubscriptionByOrgBillingId>> | null = null;
+    let orgBillingId: string | undefined;
+
+    if (orgId) {
+      const billing = await dbService.getOrganizationBillingByOrgId(orgId);
+      if (billing) {
+        orgBillingId = billing.id;
+        existingSub = await dbService.getSubscriptionByOrgBillingId(billing.id);
+      }
+    }
+
+    // Already processed (e.g. webhook beat us)
+    if (existingSub?.stripe_subscription_id === stripeSubscriptionId) {
+      return c.json({ confirmed: true, alreadyProcessed: true });
+    }
+
+    const now = Date.now();
+
+    if (existingSub) {
+      const isActiveTrial = existingSub.status === 'TRIALING'
+        && existingSub.trial_end
+        && existingSub.trial_end > now;
+
+      if (isActiveTrial) {
+        await dbService.updateSubscription(existingSub.id, {
+          stripe_subscription_id: stripeSubscriptionId,
+          plan_id: planId,
+          seats,
+          status: 'TRIALING',
+        });
+      } else {
+        const periodEnd = new Date(now);
+        if (plan.billing_interval === 'YEARLY') {
+          periodEnd.setFullYear(periodEnd.getFullYear() + 1);
+        } else {
+          periodEnd.setMonth(periodEnd.getMonth() + 1);
+        }
+
+        await dbService.convertSubscriptionToActive(existingSub.id, {
+          planId,
+          seats,
+          stripeSubscriptionId,
+          currentPeriodStart: new Date(now),
+          currentPeriodEnd: periodEnd,
+          status: 'ACTIVE',
+        });
+
+        if (orgBillingId) {
+          await dbService.updateOrganizationBilling(orgBillingId, {
+            trial_converted: true,
+          });
+        }
+      }
+    } else {
+      const periodEnd = new Date(now);
+      if (plan.billing_interval === 'YEARLY') {
+        periodEnd.setFullYear(periodEnd.getFullYear() + 1);
+      } else {
+        periodEnd.setMonth(periodEnd.getMonth() + 1);
+      }
+
+      await dbService.createSubscription({
+        id: nanoid(),
+        customer_id: customer.id,
+        org_billing_id: orgBillingId,
+        plan_id: planId,
+        status: 'ACTIVE',
+        seats,
+        stripe_subscription_id: stripeSubscriptionId,
+        current_period_start: now,
+        current_period_end: periodEnd.getTime(),
+      });
+    }
+
+    console.log(`Checkout confirmed: subscription ${stripeSubscriptionId} for user ${user.userId}, plan ${plan.name}`);
+    return c.json({ confirmed: true });
+  } catch (error) {
+    console.error('Checkout confirm error:', error);
+    return c.json({ error: 'Failed to confirm checkout' }, 500);
   }
 });
 

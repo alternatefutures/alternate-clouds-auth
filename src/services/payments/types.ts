@@ -172,6 +172,24 @@ export interface CreateTransferInput {
   sourceTransaction?: string;
 }
 
+export interface CreateCheckoutSessionInput {
+  mode: 'subscription' | 'payment';
+  customerId: string;
+  priceId?: string;
+  quantity?: number;
+  amount?: number;
+  currency?: string;
+  successUrl: string;
+  cancelUrl: string;
+  trialEnd?: number;
+  metadata?: Record<string, string>;
+}
+
+export interface CheckoutSession {
+  id: string;
+  url: string;
+}
+
 export interface CancelSubscriptionInput {
   immediately?: boolean;
 }
@@ -225,6 +243,9 @@ export interface PaymentProvider {
   // Invoices (optional)
   getInvoice?(invoiceId: string): Promise<ExternalInvoice | null>;
   listInvoices?(customerId: string, limit?: number): Promise<ExternalInvoice[]>;
+
+  // Checkout Sessions (Stripe Checkout redirect flow)
+  createCheckoutSession?(input: CreateCheckoutSessionInput): Promise<CheckoutSession>;
 
   // Webhooks
   verifyWebhookSignature(payload: string | Buffer, signature: string): boolean;

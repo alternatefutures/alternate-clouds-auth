@@ -538,6 +538,27 @@ app.post('/notify', async (c) => {
 });
 
 // ============================================
+// MONTHLY SPEND — Real ledger-based monthly usage
+// ============================================
+
+/**
+ * GET /internal/billing/org-monthly-spend/:orgId
+ *
+ * Returns total DEBIT amount from the usage ledger for the current
+ * calendar month. Includes all spend: compute, AI inference, etc.
+ */
+app.get('/org-monthly-spend/:orgId', async (c) => {
+  try {
+    const { orgId } = c.req.param();
+    const spendCents = await dbService.getOrgMonthlySpendCents(orgId);
+    return c.json({ orgId, currentMonthCents: spendCents });
+  } catch (error) {
+    console.error('[Internal Billing] Monthly spend error:', error);
+    return c.json({ error: 'Internal error' }, 500);
+  }
+});
+
+// ============================================
 // SUBSCRIPTION STATUS — For service-cloud-api pre-deploy checks
 // ============================================
 

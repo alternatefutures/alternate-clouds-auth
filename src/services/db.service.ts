@@ -1990,6 +1990,7 @@ export class DatabaseService {
     if (updates.status !== undefined) data.status = updates.status;
     if (updates.seats !== undefined) data.seats = updates.seats;
     if (updates.plan_id !== undefined) data.planId = updates.plan_id;
+    if (updates.stripe_subscription_id !== undefined) data.stripeSubscriptionId = updates.stripe_subscription_id || null;
     if (updates.current_period_start !== undefined) data.currentPeriodStart = new Date(updates.current_period_start);
     if (updates.current_period_end !== undefined) data.currentPeriodEnd = new Date(updates.current_period_end);
     if (updates.cancel_at !== undefined) data.cancelAt = timestampToDate(updates.cancel_at);
@@ -2209,6 +2210,32 @@ export class DatabaseService {
 
   /**
    * Get subscription status for an org (used by subscription guard).
+   * Sum all DEBIT ledger entries for an org in the current calendar month.
+   * Excludes topup credits — only counts usage spend.
+   */
+  async getOrgMonthlySpendCents(orgId: string): Promise<number> {
+    const orgBilling = await this.prisma.organizationBilling.findUnique({
+      where: { organizationId: orgId },
+      select: { id: true },
+    });
+    if (!orgBilling) return 0;
+
+    const now = new Date();
+    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+
+    const result = await this.prisma.organizationUsageLedger.aggregate({
+      where: {
+        orgBillingId: orgBilling.id,
+        direction: 'DEBIT',
+        createdAt: { gte: monthStart },
+      },
+      _sum: { amountCents: true },
+    });
+
+    return result._sum.amountCents ?? 0;
+  }
+
+  /**
    * Returns the most relevant subscription (ACTIVE > TRIALING > TRIAL_EXPIRED > SUSPENDED).
    */
   async getOrgSubscriptionStatus(orgId: string): Promise<{
