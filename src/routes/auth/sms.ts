@@ -133,6 +133,26 @@ app.post('/verify', strictRateLimit, async (c) => {
         verified: 1,
         is_primary: 1,
       });
+
+      // Create default organization for new user
+      const orgSlug = `user-${user.id.slice(0, 8)}`;
+      const orgName = phone.slice(-4);
+
+      try {
+        await dbService.createDefaultOrganizationForUser({
+          orgId: nanoid(),
+          memberId: nanoid(),
+          billingId: nanoid(),
+          billingCustomerId: nanoid(),
+          subscriptionId: nanoid(),
+          userId: user.id,
+          orgSlug,
+          orgName: `User ${orgName}'s Org`,
+        });
+      } catch (orgError: any) {
+        console.error(`[sms-onboard] Org creation failed for user ${user.id}:`, orgError?.message || orgError);
+        return c.json({ error: 'Account setup failed. Please try again.' }, 500);
+      }
     } else {
       // Update existing user
       await dbService.updateUser(user.id, {
@@ -152,7 +172,28 @@ app.post('/verify', strictRateLimit, async (c) => {
           is_primary: 0,
         });
       }
-      // Note: No updateAuthMethod method exists, auth methods are immutable once created
+
+      // Ensure existing user has an organization
+      const existingOrgs = await dbService.getOrganizationsByUserId(user.id);
+      if (existingOrgs.length === 0) {
+        const orgSlug = `user-${user.id.slice(0, 8)}`;
+        const orgName = phone.slice(-4);
+
+        try {
+          await dbService.createDefaultOrganizationForUser({
+            orgId: nanoid(),
+            memberId: nanoid(),
+            billingId: nanoid(),
+            billingCustomerId: nanoid(),
+            subscriptionId: nanoid(),
+            userId: user.id,
+            orgSlug,
+            orgName: `User ${orgName}'s Org`,
+          });
+        } catch (orgError: any) {
+          console.error(`[sms-onboard] Org creation failed for existing user ${user.id}:`, orgError?.message || orgError);
+        }
+      }
     }
 
     // Generate JWT tokens

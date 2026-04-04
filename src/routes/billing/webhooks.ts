@@ -223,6 +223,7 @@ async function processStripeEvent(event: WebhookEvent): Promise<void> {
               orgBillingId,
               amountCents,
               userId,
+              organizationId: metadata.orgId,
             });
             console.log(`Topup processed via webhook: $${(result.amountAddedCents / 100).toFixed(2)} added, balance: $${(result.balanceCents / 100).toFixed(2)}, alreadyProcessed: ${result.alreadyProcessed}`);
           } catch (topupError) {

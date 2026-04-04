@@ -622,6 +622,16 @@ app.post('/checkout', async (c) => {
       return c.json({ error: 'Missing planId, successUrl, or cancelUrl' }, 400);
     }
 
+    if (orgId) {
+      const member = await dbService.getOrganizationMember(orgId, user.userId);
+      if (!member) {
+        return c.json({ error: 'Not a member of this organization' }, 403);
+      }
+      if (member.role !== 'OWNER' && member.role !== 'ADMIN') {
+        return c.json({ error: 'OWNER or ADMIN role required for billing changes' }, 403);
+      }
+    }
+
     const plan = await dbService.getSubscriptionPlanById(planId);
     if (!plan || !plan.is_active) {
       return c.json({ error: 'Plan not found or inactive' }, 404);

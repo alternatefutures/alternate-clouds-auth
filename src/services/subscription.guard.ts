@@ -10,9 +10,12 @@ import { dbService } from './db.service';
 import { getAuthUser } from '../middleware/auth';
 
 /**
- * Look up the user's primary org and return its subscription status.
+ * Look up subscription status for a specific org, or fall back to user's first org.
  */
-export async function getUserSubscriptionStatus(userId: string) {
+export async function getUserSubscriptionStatus(userId: string, orgId?: string) {
+  if (orgId) {
+    return dbService.getOrgSubscriptionStatus(orgId);
+  }
   const orgs = await dbService.getOrganizationsByUserId(userId);
   if (!orgs.length) return null;
 
@@ -27,7 +30,8 @@ export async function subscriptionGuard(c: Context, next: Next) {
   const user = getAuthUser(c);
   if (!user) return next();
 
-  const status = await getUserSubscriptionStatus(user.userId);
+  const orgId = c.req.header('X-Organization-Id') || undefined;
+  const status = await getUserSubscriptionStatus(user.userId, orgId);
 
   if (status?.status === 'SUSPENDED') {
     return c.json({

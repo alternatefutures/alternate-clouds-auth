@@ -128,7 +128,7 @@ app.post('/logout', authMiddleware, async (c) => {
   try {
     const user = requireAuthUser(c);
 
-    const body = await c.req.json();
+    const body = await c.req.json().catch(() => ({}));
     const { refreshToken } = body;
 
     if (refreshToken) {
@@ -142,6 +142,13 @@ app.post('/logout', authMiddleware, async (c) => {
           metadata: { sessionId: session.id },
         });
       }
+    } else if (user.sessionId && !user.sessionId.startsWith('pat:')) {
+      await dbService.revokeSession(user.sessionId);
+      await auditLogService.logFromContext(c, {
+        userId: user.userId,
+        eventType: 'SESSION_REVOKE',
+        metadata: { sessionId: user.sessionId, method: 'access_token' },
+      });
     }
 
     return c.json({
