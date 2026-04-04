@@ -48,8 +48,12 @@ app.use('*', authMiddleware);
 // VALIDATION SCHEMAS
 // ============================================
 
+const MAX_TOPUP_USD = 10_000;
+
 const topupCreateIntentSchema = z.object({
-  usdAmount: z.number().positive('USD amount must be positive'),
+  usdAmount: z.number()
+    .positive('USD amount must be positive')
+    .max(MAX_TOPUP_USD, `Topup amount cannot exceed $${MAX_TOPUP_USD.toLocaleString()}`),
 });
 
 const topupFinalizeSchema = z.object({
@@ -60,10 +64,14 @@ const topupFinalizeSchema = z.object({
 // HELPER FUNCTIONS
 // ============================================
 
-async function verifyOrgMembershipAndGetBilling(userId: string, orgId: string) {
-  const isMember = await dbService.isUserMemberOfOrganization(userId, orgId);
-  if (!isMember) {
+async function verifyOrgMembershipAndGetBilling(userId: string, orgId: string, requiredRoles?: string[]) {
+  const member = await dbService.getOrganizationMember(userId, orgId);
+  if (!member) {
     return { error: 'Not a member of this organization', status: 403 };
+  }
+
+  if (requiredRoles && !requiredRoles.includes(member.role)) {
+    return { error: 'Insufficient permissions. OWNER or ADMIN role required.', status: 403 };
   }
 
   const orgBilling = await dbService.getOrganizationBillingByOrgId(orgId);
@@ -222,7 +230,7 @@ app.post('/org/:orgId/topup/create-intent', async (c) => {
     const user = requireAuthUser(c);
     const { orgId } = c.req.param();
 
-    const memberResult = await verifyOrgMembershipAndGetBilling(user.userId, orgId);
+    const memberResult = await verifyOrgMembershipAndGetBilling(user.userId, orgId, ['OWNER', 'ADMIN']);
     if ('error' in memberResult) {
       return c.json({ error: memberResult.error }, memberResult.status as 403 | 404);
     }
@@ -302,7 +310,7 @@ app.post('/org/:orgId/topup/finalize', async (c) => {
     const user = requireAuthUser(c);
     const { orgId } = c.req.param();
 
-    const memberResult = await verifyOrgMembershipAndGetBilling(user.userId, orgId);
+    const memberResult = await verifyOrgMembershipAndGetBilling(user.userId, orgId, ['OWNER', 'ADMIN']);
     if ('error' in memberResult) {
       return c.json({ error: memberResult.error }, memberResult.status as 403 | 404);
     }

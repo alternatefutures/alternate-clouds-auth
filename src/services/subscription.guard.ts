@@ -22,8 +22,31 @@ export async function getUserSubscriptionStatus(userId: string, orgId?: string) 
   return dbService.getOrgSubscriptionStatus(orgs[0].id);
 }
 
+const BLOCKED_STATUSES: Record<string, { error: string; message: string }> = {
+  SUSPENDED: {
+    error: 'subscription_suspended',
+    message: 'Your subscription is suspended. Please subscribe to continue using this feature.',
+  },
+  CANCELED: {
+    error: 'subscription_canceled',
+    message: 'Your subscription has been canceled. Please resubscribe to continue.',
+  },
+  UNPAID: {
+    error: 'subscription_unpaid',
+    message: 'Your subscription payment has failed. Please update your payment method.',
+  },
+  PAST_DUE: {
+    error: 'subscription_past_due',
+    message: 'Your subscription payment is past due. Please update your payment method to continue.',
+  },
+  TRIAL_EXPIRED: {
+    error: 'trial_expired',
+    message: 'Your trial has expired. Please subscribe to continue using this feature.',
+  },
+};
+
 /**
- * Hono middleware that blocks requests if the user's subscription is SUSPENDED.
+ * Hono middleware that blocks requests for non-active subscription statuses.
  * Must be placed AFTER authMiddleware.
  */
 export async function subscriptionGuard(c: Context, next: Next) {
@@ -33,11 +56,9 @@ export async function subscriptionGuard(c: Context, next: Next) {
   const orgId = c.req.header('X-Organization-Id') || undefined;
   const status = await getUserSubscriptionStatus(user.userId, orgId);
 
-  if (status?.status === 'SUSPENDED') {
-    return c.json({
-      error: 'subscription_suspended',
-      message: 'Your subscription is suspended. Please subscribe to continue using this feature.',
-    }, 403);
+  const blockedInfo = status?.status ? BLOCKED_STATUSES[status.status] : null;
+  if (blockedInfo) {
+    return c.json(blockedInfo, 403);
   }
 
   return next();
