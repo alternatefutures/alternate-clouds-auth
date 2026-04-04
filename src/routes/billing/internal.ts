@@ -524,9 +524,38 @@ app.post('/notify', async (c) => {
         break;
     }
 
+    let recipientEmail = data.email;
+    if (!recipientEmail) {
+      const orgBilling = await dbService.getOrganizationBillingByOrgId(data.orgId);
+      if (orgBilling) {
+        const ownerInfo = await dbService.getOrgOwnerEmail(orgBilling.id);
+        recipientEmail = ownerInfo?.email;
+      }
+    }
+
+    if (!recipientEmail) {
+      console.warn(`[Internal Billing] No recipient email for notify type=${data.type} orgId=${data.orgId}`);
+      return c.json({ success: false, error: 'No recipient email found' }, 400);
+    }
+
+    let textBody = htmlBody;
+    let prev = '';
+    while (prev !== textBody) {
+      prev = textBody;
+      textBody = textBody.replace(/<[^>]*>/g, '');
+    }
+    textBody = textBody
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&quot;/g, '"')
+      .replace(/&#39;/g, "'")
+      .replace(/&amp;/g, '&');
+    textBody = textBody.replace(/\s+/g, ' ').trim();
+
     await emailService.sendEmail({
-      to: data.email,
+      to: recipientEmail,
       subject,
+      text: textBody,
       html: htmlBody,
     });
 
