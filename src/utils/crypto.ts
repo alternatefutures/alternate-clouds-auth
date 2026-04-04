@@ -37,19 +37,9 @@ export function verifyTokenHash(token: string, hash: string): boolean {
  * Use this instead of === or !== for comparing secrets
  */
 export function timingSafeCompare(a: string, b: string): boolean {
-  if (a.length !== b.length) {
-    // Compare against itself to prevent timing leak from length difference
-    // This ensures constant-time execution
-    const dummy = Buffer.from(a, 'utf8');
-    timingSafeEqual(dummy, dummy);
-    return false;
-  }
-  
-  try {
-    return timingSafeEqual(Buffer.from(a, 'utf8'), Buffer.from(b, 'utf8'));
-  } catch {
-    return false;
-  }
+  const hashA = createHash('sha256').update(a, 'utf8').digest();
+  const hashB = createHash('sha256').update(b, 'utf8').digest();
+  return timingSafeEqual(hashA, hashB);
 }
 
 /**

@@ -204,7 +204,7 @@ export function rateLimit(config: RateLimitConfig) {
   } = config;
 
   return async (c: Context, next: Next) => {
-    if (process.env.NODE_ENV === 'test' || process.env.VITEST === 'true') {
+    if ((process.env.NODE_ENV === 'test' || process.env.VITEST === 'true') && process.env.NODE_ENV !== 'production') {
       return next();
     }
 

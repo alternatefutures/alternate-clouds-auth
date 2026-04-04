@@ -78,18 +78,12 @@ app.post('/verify', strictRateLimit, async (c) => {
     // Get verification code from database
     const verificationCode = await dbService.getVerificationCode(email, 'email');
 
-    if (!verificationCode) {
-      return c.json({ error: 'No verification code found for this email' }, 404);
+    if (!verificationCode || Date.now() > verificationCode.expires_at) {
+      return c.json({ error: 'Invalid or expired verification code' }, 400);
     }
 
-    // Check if code has expired
-    if (Date.now() > verificationCode.expires_at) {
-      return c.json({ error: 'Verification code has expired' }, 400);
-    }
-
-    // Check if max attempts exceeded
     if (verificationCode.attempts >= verificationCode.max_attempts) {
-      return c.json({ error: 'Too many failed attempts. Please request a new code.' }, 400);
+      return c.json({ error: 'Invalid or expired verification code' }, 400);
     }
 
     // Verify code (timing-safe comparison to prevent timing attacks)
