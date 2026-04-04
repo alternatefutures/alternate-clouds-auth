@@ -1430,6 +1430,25 @@ export class DatabaseService {
     };
   }
 
+  async getOrganizationBillingById(id: string): Promise<OrganizationBilling | null> {
+    const result = await this.prisma.organizationBilling.findUnique({
+      where: { id },
+    });
+
+    if (!result) return null;
+
+    return {
+      id: result.id,
+      organization_id: result.organizationId,
+      stripe_customer_id: result.stripeCustomerId ?? undefined,
+      trial_started_at: dateToTimestamp(result.trialStartedAt),
+      trial_ends_at: dateToTimestamp(result.trialEndsAt),
+      trial_converted: result.trialConverted,
+      created_at: result.createdAt.getTime(),
+      updated_at: result.updatedAt.getTime(),
+    };
+  }
+
   async updateOrganizationBilling(id: string, updates: Partial<Omit<OrganizationBilling, 'id' | 'organization_id' | 'created_at' | 'updated_at'>>): Promise<void> {
     const data: Record<string, unknown> = {};
 

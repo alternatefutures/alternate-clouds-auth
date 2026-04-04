@@ -192,6 +192,7 @@ app.post('/verify', strictRateLimit, async (c) => {
           });
         } catch (orgError: any) {
           console.error(`[sms-onboard] Org creation failed for existing user ${user.id}:`, orgError?.message || orgError);
+          return c.json({ error: 'Account setup failed. Please try again.' }, 500);
         }
       }
     }

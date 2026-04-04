@@ -288,7 +288,8 @@ export const aiProxyRateLimit = rateLimit({
   windowMs: 60 * 1000,
   max: 120,
   keyGenerator: (c: Context) => {
-    const userId = c.get('userId') || c.req.header('x-forwarded-for') || 'unknown';
+    const user = c.get('user') as { userId?: string } | undefined;
+    const userId = user?.userId || c.req.header('x-forwarded-for') || 'unknown';
     return `ai:${userId}`;
   },
 });

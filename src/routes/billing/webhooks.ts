@@ -217,18 +217,14 @@ async function processStripeEvent(event: WebhookEvent): Promise<void> {
         const userId = metadata.userId;
 
         if (orgBillingId) {
-          try {
-            const result = await processTopupFromWebhook({
-              paymentIntentId,
-              orgBillingId,
-              amountCents,
-              userId,
-              organizationId: metadata.orgId,
-            });
-            console.log(`Topup processed via webhook: $${(result.amountAddedCents / 100).toFixed(2)} added, balance: $${(result.balanceCents / 100).toFixed(2)}, alreadyProcessed: ${result.alreadyProcessed}`);
-          } catch (topupError) {
-            console.error('Credits topup webhook processing error:', topupError);
-          }
+          const result = await processTopupFromWebhook({
+            paymentIntentId,
+            orgBillingId,
+            amountCents,
+            userId,
+            organizationId: metadata.orgId,
+          });
+          console.log(`Topup processed via webhook: $${(result.amountAddedCents / 100).toFixed(2)} added, balance: $${(result.balanceCents / 100).toFixed(2)}, alreadyProcessed: ${result.alreadyProcessed}`);
         }
         break;
       }
