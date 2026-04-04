@@ -1383,15 +1383,6 @@ export class DatabaseService {
     return member !== null;
   }
 
-  async getOrganizationMember(userId: string, organizationId: string): Promise<{ role: string } | null> {
-    const member = await this.prisma.organizationMember.findUnique({
-      where: {
-        organizationId_userId: { organizationId, userId },
-      },
-      select: { role: true },
-    });
-    return member;
-  }
 
   // ============================================
   // ORGANIZATION BILLING METHODS
