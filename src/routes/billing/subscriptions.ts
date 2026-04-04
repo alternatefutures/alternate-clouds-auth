@@ -459,21 +459,42 @@ app.post('/:id/cancel', async (c) => {
     if (subscription.stripe_subscription_id) {
       const provider = getDefaultProvider();
       if (provider.cancelSubscription) {
-        await provider.cancelSubscription(subscription.stripe_subscription_id, { immediately });
+        await provider.cancelSubscription(subscription.stripe_subscription_id, { immediately: true });
       }
     }
 
-    // Update in database
-    const updates: Record<string, unknown> = {
-      status: immediately ? 'CANCELED' : subscription.status,
-      canceled_at: Date.now(),
-    };
+    // If the subscription is in an active trial, restore to TRIALING (detach Stripe sub)
+    // instead of CANCELED so the trial period survives and the scheduler can still
+    // transition TRIALING → TRIAL_EXPIRED → SUSPENDED when the trial actually ends.
+    const hasActiveTrial = subscription.trial_end && subscription.trial_end > Date.now()
+      && (subscription.status === 'TRIALING' || subscription.status === 'ACTIVE' || subscription.status === 'INCOMPLETE');
 
-    if (!immediately) {
-      updates.cancel_at = subscription.current_period_end;
+    if (hasActiveTrial && subscription.org_billing_id) {
+      await dbService.updateSubscription(subscriptionId, {
+        status: 'TRIALING',
+        stripe_subscription_id: null,
+        canceled_at: null,
+        cancel_at: null,
+      });
+
+      if (subscription.org_billing_id) {
+        await dbService.updateOrganizationBilling(subscription.org_billing_id, {
+          trial_converted: false,
+        });
+      }
+    } else {
+      const updates: Record<string, unknown> = {
+        status: immediately ? 'CANCELED' : subscription.status,
+        canceled_at: Date.now(),
+        stripe_subscription_id: immediately ? null : subscription.stripe_subscription_id,
+      };
+
+      if (!immediately) {
+        updates.cancel_at = subscription.current_period_end;
+      }
+
+      await dbService.updateSubscription(subscriptionId, updates);
     }
-
-    await dbService.updateSubscription(subscriptionId, updates);
 
     const updatedSubscription = await dbService.getSubscriptionById(subscriptionId);
     const plan = await dbService.getSubscriptionPlanById(subscription.plan_id);

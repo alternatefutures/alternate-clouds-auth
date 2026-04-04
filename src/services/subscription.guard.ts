@@ -48,6 +48,10 @@ const BLOCKED_STATUSES: Record<string, { error: string; message: string }> = {
 /**
  * Hono middleware that blocks requests for non-active subscription statuses.
  * Must be placed AFTER authMiddleware.
+ *
+ * When no subscription is found at all (null status), the user is allowed
+ * through — they may be on a free tier or pre-trial. The CANCELED status
+ * is caught by BLOCKED_STATUSES if getOrgSubscriptionStatus includes it.
  */
 export async function subscriptionGuard(c: Context, next: Next) {
   const user = getAuthUser(c);
@@ -56,9 +60,11 @@ export async function subscriptionGuard(c: Context, next: Next) {
   const orgId = c.req.header('X-Organization-Id') || undefined;
   const status = await getUserSubscriptionStatus(user.userId, orgId);
 
-  const blockedInfo = status?.status ? BLOCKED_STATUSES[status.status] : null;
-  if (blockedInfo) {
-    return c.json(blockedInfo, 403);
+  if (status?.status) {
+    const blockedInfo = BLOCKED_STATUSES[status.status];
+    if (blockedInfo) {
+      return c.json(blockedInfo, 403);
+    }
   }
 
   return next();

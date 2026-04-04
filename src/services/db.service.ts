@@ -2273,7 +2273,7 @@ export class DatabaseService {
     const sub = await this.prisma.subscription.findFirst({
       where: {
         orgBillingId: orgBilling.id,
-        status: { in: ['ACTIVE', 'TRIALING', 'TRIAL_EXPIRED', 'SUSPENDED', 'PAST_DUE'] },
+        status: { in: ['ACTIVE', 'TRIALING', 'TRIAL_EXPIRED', 'SUSPENDED', 'PAST_DUE', 'CANCELED'] },
       },
       orderBy: { createdAt: 'desc' },
     });
