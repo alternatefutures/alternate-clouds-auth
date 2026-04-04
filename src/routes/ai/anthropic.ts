@@ -94,6 +94,12 @@ app.all('/*', async (c) => {
       calculateCost: (usage) => calculateTokenCost(usage.model, usage.inputTokens, usage.outputTokens),
     });
 
+    c.req.raw.signal.addEventListener('abort', () => {
+      transformStream.finalize().catch(err =>
+        console.error('[ai-proxy] Error billing on stream abort:', err)
+      );
+    });
+
     const responseHeaders: Record<string, string> = {};
     for (const [key, value] of upstreamResponse.headers) {
       if (key.toLowerCase() !== 'content-encoding') {
