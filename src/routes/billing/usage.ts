@@ -8,6 +8,7 @@ import { nanoid } from 'nanoid';
 import { z } from 'zod';
 import { authMiddleware, requireAuthUser } from '../../middleware/auth';
 import { dbService, UsageMetricType } from '../../services/db.service';
+import { timingSafeCompare } from '../../utils/crypto';
 
 const app = new Hono();
 
@@ -138,13 +139,12 @@ app.get('/history', async (c) => {
  */
 app.post('/record', async (c) => {
   try {
-    // This is an internal endpoint — require service-to-service auth
     const internalSecret = process.env.AUTH_INTROSPECTION_SECRET;
     if (!internalSecret) {
       return c.json({ error: 'Service misconfigured' }, 500);
     }
     const provided = c.req.header('x-af-introspection-secret');
-    if (!provided || provided !== internalSecret) {
+    if (!provided || !timingSafeCompare(provided, internalSecret)) {
       return c.json({ error: 'Unauthorized — internal endpoint' }, 401);
     }
 

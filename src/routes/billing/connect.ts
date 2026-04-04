@@ -454,14 +454,7 @@ app.get('/balance', async (c) => {
   try {
     const user = requireAuthUser(c);
 
-    // Platform admin check: user must be OWNER of at least one org
     const orgs = await dbService.getOrganizationsByUserId(user.userId);
-    const isAdmin = orgs.some(async (org) => {
-      const member = await dbService.getOrganizationMember(org.id, user.userId);
-      return member?.role === 'OWNER';
-    });
-
-    // Stricter: check synchronously by loading membership for all orgs
     let hasOwnerRole = false;
     for (const org of orgs) {
       const member = await dbService.getOrganizationMember(org.id, user.userId);

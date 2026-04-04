@@ -126,9 +126,12 @@ const notifySchema = z.object({
  * Idempotency key: escrow_deposit:<orgBillingId>:<deploymentId>
  */
 app.post('/escrow-deposit', async (c) => {
+  let parsedData: z.infer<typeof escrowDepositSchema> | null = null;
+
   try {
     const body = await c.req.json();
-    const data = escrowDepositSchema.parse(body);
+    parsedData = escrowDepositSchema.parse(body);
+    const data = parsedData;
 
     const idempotencyKey = `escrow_deposit:${data.orgBillingId}:${data.deploymentId}`;
 
@@ -156,13 +159,16 @@ app.post('/escrow-deposit', async (c) => {
       return c.json({ error: 'Invalid request', details: error.issues }, 400);
     }
     if (error instanceof Error && error.message === 'INSUFFICIENT_BALANCE') {
-      const balance = await dbService.getOrCreateOrgUsageBalance(
-        (await c.req.json()).orgBillingId
-      );
-      return c.json({
-        error: 'INSUFFICIENT_BALANCE',
-        balanceCents: balance.balance_cents,
-      }, 402);
+      if (parsedData) {
+        try {
+          const balance = await dbService.getOrCreateOrgUsageBalance(parsedData.orgBillingId);
+          return c.json({
+            error: 'INSUFFICIENT_BALANCE',
+            balanceCents: balance.balance_cents,
+          }, 402);
+        } catch { /* fall through */ }
+      }
+      return c.json({ error: 'INSUFFICIENT_BALANCE' }, 402);
     }
     console.error('[Internal Billing] Escrow deposit error:', error);
     return c.json({ error: 'Internal error' }, 500);
