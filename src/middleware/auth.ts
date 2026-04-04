@@ -7,6 +7,7 @@ export interface AuthContext {
   userId: string;
   email?: string;
   sessionId: string;
+  patOrganizationId?: string;
 }
 
 /**
@@ -30,6 +31,7 @@ async function tryPATAuth(token: string): Promise<AuthContext | null> {
     userId: pat.user_id,
     email: user?.email,
     sessionId: `pat:${pat.id}`,
+    patOrganizationId: pat.organization_id,
   };
 }
 

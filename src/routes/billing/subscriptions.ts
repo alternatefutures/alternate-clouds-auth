@@ -204,9 +204,12 @@ app.post('/', async (c) => {
       }
     }
 
-    // Fallback: scan all user orgs
+    // Fallback: scan user orgs (only those where user is OWNER or ADMIN)
     if (!orgBillingId) {
       for (const org of orgs) {
+        const member = await dbService.getOrganizationMember(org.id, user.userId);
+        if (!member || (member.role !== 'OWNER' && member.role !== 'ADMIN')) continue;
+
         const billing = await dbService.getOrganizationBillingByOrgId(org.id);
         if (!billing) continue;
 
@@ -412,14 +415,27 @@ app.post('/:id/cancel', async (c) => {
     const body = await c.req.json().catch(() => ({}));
     const immediately = body.immediately === true;
 
-    const customer = await dbService.getBillingCustomerByUserId(user.userId);
-    if (!customer) {
-      return c.json({ error: 'Customer not found' }, 404);
+    const subscription = await dbService.getSubscriptionById(subscriptionId);
+    if (!subscription) {
+      return c.json({ error: 'Subscription not found' }, 404);
     }
 
-    const subscription = await dbService.getSubscriptionById(subscriptionId);
-    if (!subscription || subscription.customer_id !== customer.id) {
-      return c.json({ error: 'Subscription not found' }, 404);
+    if (subscription.org_billing_id) {
+      const orgBilling = await dbService.getOrganizationBillingById(subscription.org_billing_id);
+      if (orgBilling) {
+        const member = await dbService.getOrganizationMember(orgBilling.organization_id, user.userId);
+        if (!member) {
+          return c.json({ error: 'Not a member of this organization' }, 403);
+        }
+        if (member.role !== 'OWNER' && member.role !== 'ADMIN') {
+          return c.json({ error: 'OWNER or ADMIN role required for billing changes' }, 403);
+        }
+      }
+    } else {
+      const customer = await dbService.getBillingCustomerByUserId(user.userId);
+      if (!customer || subscription.customer_id !== customer.id) {
+        return c.json({ error: 'Subscription not found' }, 404);
+      }
     }
 
     // Cancel in provider
@@ -473,14 +489,27 @@ app.put('/:id/seats', async (c) => {
     const body = await c.req.json();
     const data = updateSeatsSchema.parse(body);
 
-    const customer = await dbService.getBillingCustomerByUserId(user.userId);
-    if (!customer) {
-      return c.json({ error: 'Customer not found' }, 404);
+    const subscription = await dbService.getSubscriptionById(subscriptionId);
+    if (!subscription) {
+      return c.json({ error: 'Subscription not found' }, 404);
     }
 
-    const subscription = await dbService.getSubscriptionById(subscriptionId);
-    if (!subscription || subscription.customer_id !== customer.id) {
-      return c.json({ error: 'Subscription not found' }, 404);
+    if (subscription.org_billing_id) {
+      const orgBilling = await dbService.getOrganizationBillingById(subscription.org_billing_id);
+      if (orgBilling) {
+        const member = await dbService.getOrganizationMember(orgBilling.organization_id, user.userId);
+        if (!member) {
+          return c.json({ error: 'Not a member of this organization' }, 403);
+        }
+        if (member.role !== 'OWNER' && member.role !== 'ADMIN') {
+          return c.json({ error: 'OWNER or ADMIN role required for billing changes' }, 403);
+        }
+      }
+    } else {
+      const customer = await dbService.getBillingCustomerByUserId(user.userId);
+      if (!customer || subscription.customer_id !== customer.id) {
+        return c.json({ error: 'Subscription not found' }, 404);
+      }
     }
 
     const plan = await dbService.getSubscriptionPlanById(subscription.plan_id);

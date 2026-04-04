@@ -31,18 +31,12 @@ const app = new Hono();
 app.use('*', async (c, next) => {
   const secret = process.env.AUTH_INTROSPECTION_SECRET;
 
-  // In development, skip auth if no secret is configured
-  if (!secret && process.env.NODE_ENV === 'development') {
-    return next();
-  }
-
   if (!secret) {
     console.error('[Internal Billing] AUTH_INTROSPECTION_SECRET not configured');
     return c.json({ error: 'Internal API not configured' }, 503);
   }
 
   const provided = c.req.header('x-af-introspection-secret');
-  // Fixed by audit 2026-03: timing-safe secret comparison (was !== operator)
   if (!provided || !timingSafeCompare(provided, secret)) {
     return c.json({ error: 'Unauthorized' }, 401);
   }

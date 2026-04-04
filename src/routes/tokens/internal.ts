@@ -18,10 +18,6 @@ const tokenService = new TokenService(dbService);
 app.use('*', async (c, next) => {
   const secret = process.env.AUTH_INTROSPECTION_SECRET;
 
-  if (!secret && process.env.NODE_ENV === 'development') {
-    return next();
-  }
-
   if (!secret) {
     console.error('[Internal Tokens] AUTH_INTROSPECTION_SECRET not configured');
     return c.json({ error: 'Internal API not configured' }, 503);

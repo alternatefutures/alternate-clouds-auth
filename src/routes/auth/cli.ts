@@ -116,6 +116,13 @@ app.post('/cli/approve', standardRateLimit, authMiddleware, async (c) => {
     return c.json({ success: true });
   }
 
+  if (organizationId) {
+    const isMember = await dbService.isUserMemberOfOrganization(authUser.userId, organizationId);
+    if (!isMember) {
+      return c.json({ error: 'Not a member of this organization' }, 403);
+    }
+  }
+
   const defaultExpiresAt = Date.now() + 30 * 24 * 60 * 60 * 1000; // 30 days
   const finalExpiresAt = expiresAt ?? defaultExpiresAt;
 
