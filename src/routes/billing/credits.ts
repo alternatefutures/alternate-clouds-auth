@@ -65,7 +65,7 @@ const topupFinalizeSchema = z.object({
 // ============================================
 
 async function verifyOrgMembershipAndGetBilling(userId: string, orgId: string, requiredRoles?: string[]) {
-  const member = await dbService.getOrganizationMember(userId, orgId);
+  const member = await dbService.getOrganizationMember(orgId, userId);
   if (!member) {
     return { error: 'Not a member of this organization', status: 403 };
   }
