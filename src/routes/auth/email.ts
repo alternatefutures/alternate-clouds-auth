@@ -159,6 +159,7 @@ app.post('/verify', strictRateLimit, async (c) => {
       } catch (orgError: any) {
         console.error(`[org-create] ✖ Failed for new user ${user.id}:`, orgError?.message || orgError);
         console.error(`[org-create]   Code: ${orgError?.code}, Meta: ${JSON.stringify(orgError?.meta)}`);
+        return c.json({ error: 'Account setup failed. Please try again.' }, 500);
       }
     } else {
       // Update email verification status

@@ -10,6 +10,36 @@ import { authMiddleware, requireAuthUser } from '../../middleware/auth';
 import { dbService } from '../../services/db.service';
 import { getDefaultProvider } from '../../services/payments';
 
+/**
+ * Best-effort call to service-cloud-api to resume suspended compute after topup.
+ */
+async function triggerComputeResumeCheck(args: {
+  orgBillingId: string;
+  organizationId: string;
+  newBalanceCents: number;
+}): Promise<void> {
+  const cloudApiUrl = process.env.CLOUD_API_URL;
+  if (!cloudApiUrl) return;
+
+  const secret = process.env.AUTH_INTROSPECTION_SECRET;
+  try {
+    const res = await fetch(`${cloudApiUrl}/internal/compute/check-resume`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(secret ? { 'x-af-introspection-secret': secret } : {}),
+      },
+      body: JSON.stringify(args),
+    });
+
+    if (!res.ok) {
+      console.error(`[credits] check-resume returned ${res.status}`);
+    }
+  } catch (err) {
+    console.error('[credits] Failed to call check-resume:', err);
+  }
+}
+
 const app = new Hono();
 
 app.use('*', authMiddleware);
@@ -330,6 +360,14 @@ app.post('/org/:orgId/topup/finalize', async (c) => {
       },
     });
 
+    if (!result.alreadyProcessed) {
+      triggerComputeResumeCheck({
+        orgBillingId: memberResult.orgBilling.id,
+        organizationId: orgId,
+        newBalanceCents: result.balanceCents,
+      }).catch((err) => console.error('[credits] resume check failed:', err));
+    }
+
     return c.json({
       success: true,
       amountAddedCents: result.alreadyProcessed ? 0 : amountCents,
@@ -360,8 +398,9 @@ export async function processTopupFromWebhook(args: {
   orgBillingId: string;
   amountCents: number;
   userId?: string;
+  organizationId?: string;
 }): Promise<{ amountAddedCents: number; balanceCents: number; alreadyProcessed: boolean }> {
-  const { paymentIntentId, orgBillingId, amountCents, userId } = args;
+  const { paymentIntentId, orgBillingId, amountCents, userId, organizationId } = args;
 
   const idempotencyKey = `topup:${orgBillingId}:${paymentIntentId}`;
 
@@ -378,6 +417,14 @@ export async function processTopupFromWebhook(args: {
       source: 'webhook',
     },
   });
+
+  if (!result.alreadyProcessed && organizationId) {
+    triggerComputeResumeCheck({
+      orgBillingId,
+      organizationId,
+      newBalanceCents: result.balanceCents,
+    }).catch((err) => console.error('[credits] webhook resume check failed:', err));
+  }
 
   return {
     amountAddedCents: result.alreadyProcessed ? 0 : amountCents,
