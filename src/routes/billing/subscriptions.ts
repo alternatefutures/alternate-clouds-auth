@@ -17,6 +17,23 @@ import type { CreateSubscriptionInput, CreateCheckoutSessionInput } from '../../
 
 const app = new Hono();
 
+const ALLOWED_REDIRECT_ORIGINS = (process.env.ALLOWED_REDIRECT_ORIGINS || 'https://alternatefutures.ai,https://www.alternatefutures.ai,https://app.alternatefutures.ai')
+  .split(',')
+  .map(s => s.trim())
+  .filter(Boolean);
+
+function isAllowedCheckoutRedirect(url: string): boolean {
+  if (url.startsWith('/')) return true;
+  try {
+    const parsed = new URL(url);
+    return ALLOWED_REDIRECT_ORIGINS.some(origin => {
+      try { return parsed.origin === new URL(origin).origin; } catch { return false; }
+    });
+  } catch {
+    return false;
+  }
+}
+
 app.use('*', authMiddleware);
 
 const createSubscriptionSchema = z.object({
@@ -649,6 +666,10 @@ app.post('/checkout', async (c) => {
 
     if (!planId || !successUrl || !cancelUrl) {
       return c.json({ error: 'Missing planId, successUrl, or cancelUrl' }, 400);
+    }
+
+    if (!isAllowedCheckoutRedirect(successUrl) || !isAllowedCheckoutRedirect(cancelUrl)) {
+      return c.json({ error: 'Redirect URLs must be on a trusted origin' }, 400);
     }
 
     if (orgId) {

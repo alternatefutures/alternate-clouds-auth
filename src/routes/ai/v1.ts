@@ -154,6 +154,12 @@ app.post('/chat/completions', async (c) => {
       calculateCost: (usage) => calculateTokenCost(usage.model, usage.inputTokens, usage.outputTokens),
     });
 
+    c.req.raw.signal.addEventListener('abort', () => {
+      usageStream.finalize().catch(err =>
+        console.error('[ai-proxy] Error billing on stream abort:', err)
+      );
+    });
+
     const responseHeaders: Record<string, string> = {
       'Content-Type': 'text/event-stream',
       'Cache-Control': 'no-cache',
@@ -178,29 +184,39 @@ app.post('/chat/completions', async (c) => {
     openaiResponse = responseBody;
   }
 
-  try {
-    const parseUsage = entry.format === 'anthropic' ? parseAnthropicUsage : parseOpenAIUsage;
-    const usage = parseUsage(entry.format === 'anthropic' ? responseBody : openaiResponse);
+  const parseUsage = entry.format === 'anthropic' ? parseAnthropicUsage : parseOpenAIUsage;
+  const usage = parseUsage(entry.format === 'anthropic' ? responseBody : openaiResponse);
 
-    if (usage) {
-      const usdCostRaw = calculateTokenCost(usage.model, usage.inputTokens, usage.outputTokens);
-      const result = await processUsage({
-        orgBillingId: billing.orgBillingId,
-        userId: billing.userId,
-        serviceType: 'ai_inference',
-        provider: entry.provider,
-        resource: 'chat/completions',
-        model: usage.model,
-        usdCostRaw,
-      });
+  if (usage) {
+    const usdCostRaw = calculateTokenCost(usage.model, usage.inputTokens, usage.outputTokens);
 
-      return c.json(openaiResponse, 200, {
-        'x-af-balance-cents': result.newBalanceCents.toString(),
-        'x-af-provider': entry.provider,
-      });
+    // Fail-closed: retry once on transient failure, then return 500
+    let result: Awaited<ReturnType<typeof processUsage>> | null = null;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        result = await processUsage({
+          orgBillingId: billing.orgBillingId,
+          userId: billing.userId,
+          serviceType: 'ai_inference',
+          provider: entry.provider,
+          resource: 'chat/completions',
+          model: usage.model,
+          usdCostRaw,
+        });
+        break;
+      } catch (error) {
+        if (attempt === 1) {
+          console.error('CRITICAL: AI usage billing failed after retry — blocking response', error);
+          return c.json({ error: 'Billing processing failed. Your account was not charged. Please retry.' }, 500);
+        }
+        console.warn('AI usage billing failed, retrying...', error);
+      }
     }
-  } catch (error) {
-    console.error('Error processing usage:', error);
+
+    return c.json(openaiResponse, 200, {
+      'x-af-balance-cents': result!.newBalanceCents.toString(),
+      'x-af-provider': entry.provider,
+    });
   }
 
   return c.json(openaiResponse, 200, {

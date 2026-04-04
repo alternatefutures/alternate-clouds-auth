@@ -232,12 +232,16 @@ async function processStripeEvent(event: WebhookEvent): Promise<void> {
       // Standard payment processing
       const payment = await dbService.getPaymentByStripePaymentIntentId(paymentIntentId);
       if (payment) {
+        // Idempotency: skip if this payment was already settled synchronously
+        if (payment.status === 'SUCCEEDED') {
+          break;
+        }
+
         await dbService.updatePayment(payment.id, { status: 'SUCCEEDED' });
 
-        // Update invoice
         if (payment.invoice_id) {
           const invoice = await dbService.getInvoiceById(payment.invoice_id);
-          if (invoice) {
+          if (invoice && invoice.status !== 'PAID') {
             const newAmountPaid = invoice.amount_paid + payment.amount;
             const newAmountDue = invoice.total - newAmountPaid;
             await dbService.updateInvoice(invoice.id, {
@@ -554,11 +558,15 @@ async function processStaxEvent(event: WebhookEvent): Promise<void> {
       const transactionId = data.id as string;
       const payment = await dbService.getPaymentByStaxTransactionId(transactionId);
       if (payment) {
+        if (payment.status === 'SUCCEEDED') {
+          break;
+        }
+
         await dbService.updatePayment(payment.id, { status: 'SUCCEEDED' });
 
         if (payment.invoice_id) {
           const invoice = await dbService.getInvoiceById(payment.invoice_id);
-          if (invoice) {
+          if (invoice && invoice.status !== 'PAID') {
             const newAmountPaid = invoice.amount_paid + payment.amount;
             const newAmountDue = invoice.total - newAmountPaid;
             await dbService.updateInvoice(invoice.id, {
@@ -611,11 +619,15 @@ async function processRelayEvent(event: WebhookEvent): Promise<void> {
       const txHash = data.txHash as string;
       const payment = await dbService.getPaymentByTxHash(txHash);
       if (payment) {
+        if (payment.status === 'SUCCEEDED') {
+          break;
+        }
+
         await dbService.updatePayment(payment.id, { status: 'SUCCEEDED' });
 
         if (payment.invoice_id) {
           const invoice = await dbService.getInvoiceById(payment.invoice_id);
-          if (invoice) {
+          if (invoice && invoice.status !== 'PAID') {
             const newAmountPaid = invoice.amount_paid + payment.amount;
             const newAmountDue = invoice.total - newAmountPaid;
             await dbService.updateInvoice(invoice.id, {

@@ -143,6 +143,12 @@ app.all('/*', async (c) => {
       calculateCost: (usage) => calculateChatCompletionsCost(usage.model, usage.inputTokens, usage.outputTokens),
     });
 
+    c.req.raw.signal.addEventListener('abort', () => {
+      transformStream.finalize().catch(err =>
+        console.error('[ai-proxy] Error billing on stream abort:', err)
+      );
+    });
+
     const responseHeaders: Record<string, string> = {};
     for (const [key, value] of upstreamResponse.headers) {
       if (key.toLowerCase() !== 'content-encoding') {
@@ -161,62 +167,64 @@ app.all('/*', async (c) => {
   const responseBody = await upstreamResponse.json();
 
   // Process usage based on endpoint type
-  try {
-    let usdCostRaw = 0;
-    let model = '';
+  let usdCostRaw = 0;
+  let model = '';
 
-    if (endpoint.includes('chat/completions') || endpoint.includes('responses')) {
-      // Chat completions
-      const usage = parseOpenAIUsage(responseBody);
-      if (usage) {
-        model = usage.model;
-        usdCostRaw = calculateChatCompletionsCost(usage.model, usage.inputTokens, usage.outputTokens);
+  if (endpoint.includes('chat/completions') || endpoint.includes('responses')) {
+    const usage = parseOpenAIUsage(responseBody);
+    if (usage) {
+      model = usage.model;
+      usdCostRaw = calculateChatCompletionsCost(usage.model, usage.inputTokens, usage.outputTokens);
+    }
+  } else if (endpoint.includes('images/generations')) {
+    const reqBody = await c.req.json().catch(() => ({}));
+    model = reqBody.model || 'dall-e-3';
+    const imageCount = reqBody.n || 1;
+    const size = reqBody.size || '1024x1024';
+    const quality = reqBody.quality || 'standard';
+    usdCostRaw = calculateImageCost(model, imageCount, size, quality);
+  } else if (endpoint.includes('embeddings')) {
+    const usage = responseBody.usage as { total_tokens?: number } | undefined;
+    model = responseBody.model || 'text-embedding-3-small';
+    const totalTokens = usage?.total_tokens || 0;
+    usdCostRaw = calculateTokenCost(model, totalTokens, 0);
+  } else if (endpoint.includes('audio/transcriptions') || endpoint.includes('audio/translations')) {
+    model = 'whisper-1';
+    usdCostRaw = 0.006;
+  } else if (endpoint.includes('audio/speech')) {
+    const reqBody = await c.req.json().catch(() => ({}));
+    model = reqBody.model || 'tts-1';
+    const inputLength = (reqBody.input || '').length;
+    usdCostRaw = inputLength * (model === 'tts-1-hd' ? 0.00003 : 0.000015);
+  }
+
+  if (usdCostRaw > 0) {
+    // Fail-closed: retry once on transient failure, then return 500
+    let result: Awaited<ReturnType<typeof processUsage>> | null = null;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        result = await processUsage({
+          orgBillingId: billing.orgBillingId,
+          userId: billing.userId,
+          serviceType: 'ai_inference',
+          provider: 'openai',
+          resource: endpoint,
+          model,
+          usdCostRaw,
+        });
+        break;
+      } catch (error) {
+        if (attempt === 1) {
+          console.error('CRITICAL: AI usage billing failed after retry — blocking response', error);
+          return c.json({ error: 'Billing processing failed. Your account was not charged. Please retry.' }, 500);
+        }
+        console.warn('AI usage billing failed, retrying...', error);
       }
-    } else if (endpoint.includes('images/generations')) {
-      // Image generation
-      const requestBody = await c.req.json().catch(() => ({}));
-      model = requestBody.model || 'dall-e-3';
-      const imageCount = requestBody.n || 1;
-      const size = requestBody.size || '1024x1024';
-      const quality = requestBody.quality || 'standard';
-      usdCostRaw = calculateImageCost(model, imageCount, size, quality);
-    } else if (endpoint.includes('embeddings')) {
-      // Embeddings
-      const usage = responseBody.usage as { total_tokens?: number } | undefined;
-      model = responseBody.model || 'text-embedding-3-small';
-      const totalTokens = usage?.total_tokens || 0;
-      usdCostRaw = calculateTokenCost(model, totalTokens, 0);
-    } else if (endpoint.includes('audio/transcriptions') || endpoint.includes('audio/translations')) {
-      // Audio (transcription/translation) - charge based on audio duration
-      model = 'whisper-1';
-      // Estimate: assume 1 minute average
-      usdCostRaw = 0.006;
-    } else if (endpoint.includes('audio/speech')) {
-      // Text-to-speech - charge based on input text length
-      const requestBody = await c.req.json().catch(() => ({}));
-      model = requestBody.model || 'tts-1';
-      const inputLength = (requestBody.input || '').length;
-      usdCostRaw = inputLength * (model === 'tts-1-hd' ? 0.00003 : 0.000015);
     }
 
-    if (usdCostRaw > 0) {
-      const result = await processUsage({
-        orgBillingId: billing.orgBillingId,
-        userId: billing.userId,
-        serviceType: 'ai_inference',
-        provider: 'openai',
-        resource: endpoint,
-        model,
-        usdCostRaw,
-      });
-
-      return c.json(responseBody, 200, {
-        'x-af-balance-cents': result.newBalanceCents.toString(),
-      });
-    }
-  } catch (error) {
-    console.error('Error processing usage:', error);
-    // Still return the response even if usage processing fails
+    return c.json(responseBody, 200, {
+      'x-af-balance-cents': result!.newBalanceCents.toString(),
+    });
   }
 
   return c.json(responseBody, 200, {
