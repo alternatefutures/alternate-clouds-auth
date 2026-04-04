@@ -20,6 +20,15 @@ import { timingSafeCompare } from '../../utils/crypto';
 
 const app = new Hono();
 
+function escapeHtml(str: string): string {
+  return str
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 // ============================================
 // INTROSPECTION SECRET GUARD
 // ============================================
@@ -465,7 +474,7 @@ app.post('/notify', async (c) => {
             for 1 day of active deployments (${dailyCostStr}/day).</p>
             ${data.pausedServices?.length ? `
               <p><strong>Paused services:</strong></p>
-              <ul>${data.pausedServices.map(s => `<li>${s}</li>`).join('')}</ul>
+              <ul>${data.pausedServices.map(s => `<li>${escapeHtml(s)}</li>`).join('')}</ul>
             ` : ''}
             <p>To resume your deployments, add funds to your compute wallet:</p>
             <a href="https://app.alternatefutures.ai/org/${data.orgId}/billing"
