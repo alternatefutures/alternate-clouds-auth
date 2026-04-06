@@ -86,7 +86,7 @@ jobs:
           fetch-depth: 0
 
       - name: TruffleHog Secrets Scan
-        uses: trufflesecurity/trufflehog@v3.92.5
+        uses: trufflesecurity/trufflehog@v3.94.2
         with:
           path: ./
           # Don't pass base/head explicitly; the action auto-selects the correct
