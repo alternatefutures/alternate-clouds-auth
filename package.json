@@ -34,7 +34,7 @@
     "passwordless"
   ],
   "author": "Alternate Futures",
-  "license": "MIT",
+  "license": "AGPL-3.0-only",
   "dependencies": {
     "@hono/node-server": "^1.19.5",
     "@infisical/sdk": "^2.3.4",
