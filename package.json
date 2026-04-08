@@ -36,7 +36,7 @@
   "author": "Alternate Futures",
   "license": "AGPL-3.0-only",
   "dependencies": {
-    "@hono/node-server": "^1.19.5",
+    "@hono/node-server": "^1.19.13",
     "@infisical/sdk": "^2.3.4",
     "@prisma/client": "^6.1.0",
     "dotenv": "^17.2.3",
