@@ -40,7 +40,7 @@ app.post('/challenge', strictRateLimit, async (c) => {
     const message = siweService.createMessage({
       domain: process.env.DOMAIN || 'alternatefutures.ai',
       address,
-      statement: 'Sign in to Alternate Futures with your wallet',
+      statement: 'Sign in to Alternate Clouds with your wallet',
       uri: process.env.APP_URL || 'https://app.alternatefutures.ai',
       version: '1',
       chainId: chainId || 1, // Default to Ethereum mainnet

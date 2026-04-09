@@ -65,7 +65,7 @@ export class SMSService {
       return;
     }
 
-    const body = `Your Alternate Futures verification code is: ${code}\n\nThis code will expire in 10 minutes.\n\nIf you didn't request this code, please ignore this message.`;
+    const body = `Your Alternate Clouds verification code is: ${code}\n\nThis code will expire in 10 minutes.\n\nIf you didn't request this code, please ignore this message.`;
 
     await this.sendSMS({
       to: phoneNumber,

@@ -1,7 +1,7 @@
 {
   "name": "@alternatefutures/auth-service",
   "version": "0.1.0",
-  "description": "Alternate Futures Authentication Service - Multi-method authentication system",
+  "description": "Alternate Clouds Authentication Service - Multi-method authentication system",
   "private": false,
   "type": "module",
   "main": "dist/index.js",

@@ -6,11 +6,11 @@ import { cors } from 'hono/cors';
 
 /**
  * CORS configuration for production
- * Allows requests from Alternate Futures frontend domains
+ * Allows requests from Alternate Clouds frontend domains
  */
 export const corsMiddleware = cors({
   origin: (origin) => {
-    // Allow requests from Alternate Futures domains
+    // Allow requests from Alternate Clouds domains
     const allowedOrigins = [
       'https://alternatefutures.ai',
       'https://www.alternatefutures.ai',

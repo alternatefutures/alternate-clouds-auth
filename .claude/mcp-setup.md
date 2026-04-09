@@ -1,4 +1,4 @@
-# MCP Server Setup for Alternate Futures App
+# MCP Server Setup for Alternate Clouds App
 
 This guide explains how to configure Model Context Protocol (MCP) servers for Linear and GitHub integration with Claude Code.
 

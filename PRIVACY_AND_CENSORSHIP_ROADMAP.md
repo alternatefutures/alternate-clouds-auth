@@ -578,7 +578,7 @@ You choose. Self-host or use our instance.
 
 ### Feature Comparison
 
-| Feature | Auth0 | Supabase | Clerk | **ThirdWeb** | **Privy.io** | **Alternate Futures** |
+| Feature | Auth0 | Supabase | Clerk | **ThirdWeb** | **Privy.io** | **Alternate Clouds** |
 |---------|-------|----------|-------|--------------|--------------|----------------------|
 | **Open Source** | ❌ Proprietary | ✅ Yes | ❌ Proprietary | ❌ Proprietary | ❌ Proprietary | ✅ **MIT License** |
 | **Self-Hostable** | ❌ No | ✅ Yes | ❌ No | ❌ No | ❌ No | ✅ **Yes** |
@@ -613,7 +613,7 @@ You choose. Self-host or use our instance.
 - **Best For**: Apps wanting secure embedded wallets for users
 - **Privacy**: Claims to never access user keys via MPC, but closed-source
 
-#### **Alternate Futures Auth**
+#### **Alternate Clouds Auth**
 - **Focus**: Privacy-first, censorship-resistant authentication
 - **Strength**: Open source, self-hostable, decentralized, zero tracking
 - **Weakness**: Newer project, embedded wallets not yet implemented
@@ -634,7 +634,7 @@ You choose. Self-host or use our instance.
 - Enterprise budget for authentication
 - Trust closed-source key management
 
-**Choose Alternate Futures Auth if:**
+**Choose Alternate Clouds Auth if:**
 - Privacy is non-negotiable
 - Want to self-host and control your data
 - Need to audit the code (open source)
@@ -648,7 +648,7 @@ You choose. Self-host or use our instance.
 ```
            Decentralized ↑
                          |
-                         |  ● Alternate Futures
+                         |  ● Alternate Clouds
                          |    (open source + decentralized)
                          |
                          |
@@ -668,11 +668,11 @@ You choose. Self-host or use our instance.
 
 ### Future Convergence
 
-As the roadmap is implemented, Alternate Futures Auth will offer:
+As the roadmap is implemented, Alternate Clouds Auth will offer:
 - ✅ Privacy features (like Privy's MPC, but open source)
 - ✅ Web3 features (like ThirdWeb's wallets)
 - ✅ Self-hosting (like Supabase)
-- ✅ Decentralization (unique to Alternate Futures)
+- ✅ Decentralization (unique to Alternate Clouds)
 
 **Result**: The only authentication service offering all four pillars: **Privacy + Web3 + Self-Hosting + Decentralization**
 

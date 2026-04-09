@@ -2,7 +2,7 @@
 
 ## Overview
 
-The Alternate Futures Authentication Service handles sensitive user data and authentication flows. We take security seriously and appreciate the security research community's efforts in helping us keep our users safe.
+The Alternate Clouds Authentication Service handles sensitive user data and authentication flows. We take security seriously and appreciate the security research community's efforts in helping us keep our users safe.
 
 ## Supported Versions
 

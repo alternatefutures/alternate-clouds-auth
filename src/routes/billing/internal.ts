@@ -472,7 +472,7 @@ app.post('/notify', async (c) => {
 
     switch (data.type) {
       case 'low_balance_pause':
-        subject = `[Alternate Futures] Deployments paused — insufficient balance`;
+        subject = `[Alternate Clouds] Deployments paused — insufficient balance`;
         htmlBody = `
           <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto;">
             <h2 style="color: #ef4444;">Deployments Paused</h2>
@@ -497,7 +497,7 @@ app.post('/notify', async (c) => {
         break;
 
       case 'low_balance_warning':
-        subject = `[Alternate Futures] Low balance warning — ${balanceStr} remaining`;
+        subject = `[Alternate Clouds] Low balance warning — ${balanceStr} remaining`;
         htmlBody = `
           <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto;">
             <h2 style="color: #f59e0b;">Low Balance Warning</h2>
@@ -513,7 +513,7 @@ app.post('/notify', async (c) => {
         break;
 
       case 'escrow_depleted':
-        subject = `[Alternate Futures] Escrow depleted — deployment at risk`;
+        subject = `[Alternate Clouds] Escrow depleted — deployment at risk`;
         htmlBody = `
           <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto;">
             <h2 style="color: #ef4444;">Escrow Depleted</h2>

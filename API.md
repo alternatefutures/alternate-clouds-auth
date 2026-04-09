@@ -1,6 +1,6 @@
-# Alternate Futures Authentication API Documentation
+# Alternate Clouds Authentication API Documentation
 
-Complete API reference for the Alternate Futures Authentication Service.
+Complete API reference for the Alternate Clouds Authentication Service.
 
 ## Base URL
 
@@ -125,7 +125,7 @@ Generate a Sign-In with Ethereum challenge message.
 ```json
 {
   "success": true,
-  "message": "alternatefutures.ai wants you to sign in with your Ethereum account:\n0x1234567890123456789012345678901234567890\n\nSign in to Alternate Futures with your wallet\n\nURI: https://app.alternatefutures.ai\nVersion: 1\nChain ID: 1\nNonce: abc123...\nIssued At: 2025-10-11T14:30:00Z\nExpiration Time: 2025-10-11T14:45:00Z",
+  "message": "alternatefutures.ai wants you to sign in with your Ethereum account:\n0x1234567890123456789012345678901234567890\n\nSign in to Alternate Clouds with your wallet\n\nURI: https://app.alternatefutures.ai\nVersion: 1\nChain ID: 1\nNonce: abc123...\nIssued At: 2025-10-11T14:30:00Z\nExpiration Time: 2025-10-11T14:45:00Z",
   "nonce": "abc123...",
   "expiresIn": 900
 }
