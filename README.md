@@ -107,4 +107,4 @@ See `.env.example` for the full list. Key variables:
 
 ---
 
-MIT License
+AGPL-3.0-only
