@@ -4,7 +4,7 @@
  */
 
 import { Hono } from 'hono';
-import { authMiddleware, requireAuthUser } from '../../middleware/auth';
+import { requireAuthUser } from '../../middleware/auth';
 import {
   checkBalance,
   getOrgBillingFromRequest,
@@ -16,8 +16,6 @@ const app = new Hono();
 
 const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
 const ELEVENLABS_BASE_URL = 'https://api.elevenlabs.io/v1';
-
-app.use('*', authMiddleware);
 
 app.options('/*', (c) => c.text('', 204));
 

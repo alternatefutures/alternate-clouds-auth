@@ -459,7 +459,7 @@ app.post('/:id/cancel', async (c) => {
     if (subscription.stripe_subscription_id) {
       const provider = getDefaultProvider();
       if (provider.cancelSubscription) {
-        await provider.cancelSubscription(subscription.stripe_subscription_id, { immediately: true });
+        await provider.cancelSubscription(subscription.stripe_subscription_id, { immediately });
       }
     }
 

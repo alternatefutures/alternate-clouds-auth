@@ -4,7 +4,7 @@
  */
 
 import { Hono } from 'hono';
-import { authMiddleware, requireAuthUser } from '../../middleware/auth';
+import { requireAuthUser } from '../../middleware/auth';
 import {
   calculateTokenCost,
   checkBalance,
@@ -19,8 +19,6 @@ const app = new Hono();
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const OPENAI_BASE_URL = 'https://api.openai.com/v1';
-
-app.use('*', authMiddleware);
 
 /**
  * Calculate cost for OpenAI chat completions

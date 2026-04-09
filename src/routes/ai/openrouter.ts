@@ -4,7 +4,7 @@
  */
 
 import { Hono } from 'hono';
-import { authMiddleware, requireAuthUser } from '../../middleware/auth';
+import { requireAuthUser } from '../../middleware/auth';
 import {
   calculateTokenCost,
   checkBalance,
@@ -19,8 +19,6 @@ const app = new Hono();
 
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 const OPENROUTER_BASE_URL = 'https://openrouter.ai/api/v1';
-
-app.use('*', authMiddleware);
 
 app.options('/*', (c) => c.text('', 204));
 

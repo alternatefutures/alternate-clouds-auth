@@ -5,7 +5,9 @@
 
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
+import { authMiddleware } from '../../middleware/auth';
 import { subscriptionGuard } from '../../services/subscription.guard';
+import { aiProxyRateLimit } from '../../middleware/ratelimit';
 import openaiRoutes from './openai';
 import anthropicRoutes from './anthropic';
 import openrouterRoutes from './openrouter';
@@ -28,8 +30,10 @@ app.use('*', cors({
   allowHeaders: ['*'],
 }));
 
-// Block AI proxy access for suspended subscriptions
+// Auth must run before subscription guard so user context is populated
+app.use('*', authMiddleware);
 app.use('*', subscriptionGuard);
+app.use('*', aiProxyRateLimit);
 
 // Mount provider routes
 app.route('/openai', openaiRoutes);

@@ -4,7 +4,7 @@
  */
 
 import { Hono } from 'hono';
-import { authMiddleware, requireAuthUser } from '../../middleware/auth';
+import { requireAuthUser } from '../../middleware/auth';
 import {
   calculateTokenCost,
   checkBalance,
@@ -19,8 +19,6 @@ const app = new Hono();
 
 const TOGETHER_API_KEY = process.env.TOGETHER_API_KEY;
 const TOGETHER_BASE_URL = 'https://api.together.xyz/v1';
-
-app.use('*', authMiddleware);
 
 app.options('/*', (c) => c.text('', 204));
 

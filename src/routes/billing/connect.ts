@@ -315,13 +315,27 @@ app.delete('/accounts/:id', async (c) => {
 
 /**
  * POST /billing/connect/transfers
- * Create a transfer to a connected account
+ * Create a transfer to a connected account.
+ * Requires a verified sourcePaymentId to prevent arbitrary platform-balance transfers.
  */
 app.post('/transfers', async (c) => {
   try {
     const user = requireAuthUser(c);
     const body = await c.req.json();
     const data = createTransferSchema.parse(body);
+
+    if (!data.sourcePaymentId) {
+      return c.json({ error: 'sourcePaymentId is required — transfers must be tied to a settled payment' }, 400);
+    }
+
+    const sourcePayment = await dbService.getPaymentById(data.sourcePaymentId);
+    if (!sourcePayment || sourcePayment.status !== 'SUCCEEDED') {
+      return c.json({ error: 'Source payment not found or not settled' }, 400);
+    }
+
+    if (data.amount > sourcePayment.amount) {
+      return c.json({ error: 'Transfer amount exceeds source payment amount' }, 400);
+    }
 
     const account = await dbService.getConnectedAccountById(data.connectedAccountId);
     if (!account || account.user_id !== user.userId) {
@@ -339,7 +353,6 @@ app.post('/transfers', async (c) => {
       return c.json({ error: 'Transfers not supported' }, 400);
     }
 
-    // Create transfer in provider
     const externalTransfer = await provider.createTransfer({
       amount: data.amount,
       currency: data.currency,
@@ -448,23 +461,13 @@ app.get('/transfers', async (c) => {
 
 /**
  * GET /billing/connect/balance
- * Get platform balance — restricted to platform admins only
+ * Get platform balance — restricted by introspection secret (internal/admin only)
  */
 app.get('/balance', async (c) => {
   try {
-    const user = requireAuthUser(c);
-
-    const orgs = await dbService.getOrganizationsByUserId(user.userId);
-    let hasOwnerRole = false;
-    for (const org of orgs) {
-      const member = await dbService.getOrganizationMember(org.id, user.userId);
-      if (member?.role === 'OWNER') {
-        hasOwnerRole = true;
-        break;
-      }
-    }
-
-    if (!hasOwnerRole) {
+    const secret = process.env.AUTH_INTROSPECTION_SECRET;
+    const provided = c.req.header('x-af-introspection-secret');
+    if (!secret || !provided || provided !== secret) {
       return c.json({ error: 'Platform admin access required' }, 403);
     }
 

@@ -1,7 +1,5 @@
 import { Hono } from 'hono';
-import { authMiddleware, requireAuthUser } from '../../middleware/auth';
-import { subscriptionGuard } from '../../services/subscription.guard';
-import { aiProxyRateLimit } from '../../middleware/ratelimit';
+import { requireAuthUser } from '../../middleware/auth';
 import {
   calculateTokenCost,
   checkBalance,
@@ -25,9 +23,6 @@ import {
 
 const app = new Hono();
 
-app.use('*', authMiddleware);
-app.use('*', subscriptionGuard);
-app.use('*', aiProxyRateLimit);
 app.options('/*', (c) => new Response(null, { status: 204 }));
 
 // ---------------------------------------------------------------------------
