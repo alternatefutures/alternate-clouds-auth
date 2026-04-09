@@ -1,203 +1,87 @@
-# Alternate Clouds Authentication Service
+<div align="center">
+
+# ☁️ service-auth
+
+**Authentication · Billing · AI Inference Proxy**
+
+Part of the [Alternate Clouds](https://alternatefutures.ai) platform.
 
 [![Tests](https://github.com/alternatefutures/service-auth/actions/workflows/test.yml/badge.svg)](https://github.com/alternatefutures/service-auth/actions/workflows/test.yml)
 
-Multi-method authentication system supporting email, SMS, Web3 wallets, and social OAuth providers.
+---
 
-## Features
+</div>
 
-- **Passwordless Authentication**
-  - Email OTP codes
-  - SMS OTP codes (Twilio)
+## Overview
 
-- **Web3 Wallet Support**
-  - Sign-In with Ethereum (SIWE)
-  - MetaMask, WalletConnect, Phantom
-  - Support for Ethereum and Solana
+Hono-based API service handling authentication, organization management, billing (Stripe), and an AI inference proxy with real-time cost metering across 11 providers.
 
-- **Social OAuth Providers**
-  - Google, Twitter/X, GitHub
-  - Discord (more coming soon)
-  - ~~Apple~~ (temporarily disabled)
+Runs on port **1601**.
 
-- **Account Linking**
-  - Link multiple auth methods to one account
-  - Unified user identity
-
-- **Organization Management**
-  - Org CRUD, membership, roles
-  - Org-scoped billing and subscriptions
-
-- **Billing & Usage Wallet**
-  - Stripe PaymentIntents, subscriptions, seat-based pricing
-  - Org-scoped USD credits wallet with idempotent ledger
-  - AI inference proxy with real-time cost metering (11 providers)
-
-- **Personal Access Tokens**
-  - Encrypted PAT creation/validation
-  - CLI login session management
-
-- **Security**
-  - JWT-based sessions with refresh tokens
-  - Timing-safe OTP comparison
-  - Production-enforced JWT secrets (no weak fallbacks)
-  - Rate limiting (in-memory; Redis recommended for production)
-  - Sanitized error responses in production
-
-## Tech Stack
-
-- **Runtime**: Node.js
-- **Framework**: Hono
-- **Database**: PostgreSQL via Prisma ORM
-- **Email**: Resend
-- **SMS**: Twilio
-- **Web3**: ethers.js, @noble/secp256k1
-- **Payments**: Stripe, Stax, Relay
-- **Secrets**: Infisical SDK (production)
+---
 
 ## Quick Start
 
 ```bash
-# Install dependencies
-npm install
-
-# Set up environment variables
+pnpm install
 cp .env.example .env
-
-# Apply database migrations
 npx prisma migrate dev
-
-# Run development server
-npm run dev
-
-# Build for production
-npm run build
-
-# Start production server
-npm start
+pnpm dev
 ```
 
-The server defaults to port **1601** (configurable via `PORT` env var).
+---
 
-## API Endpoints
+## Features
 
 ### Authentication
+- **Passwordless** — Email OTP (Resend), SMS OTP (Twilio)
+- **Web3** — Sign-In with Ethereum (SIWE), MetaMask, WalletConnect, Phantom
+- **OAuth** — Google, GitHub, Discord, X/Twitter
+- **Account linking** — multiple auth methods per user
+- **Personal Access Tokens** — encrypted PATs for CLI and API access
+- **JWT sessions** — access + refresh tokens, timing-safe OTP comparison
 
-```
-POST   /auth/email/request      # Request email OTP
-POST   /auth/email/verify       # Verify email OTP
-POST   /auth/sms/request        # Request SMS OTP
-POST   /auth/sms/verify         # Verify SMS OTP
-POST   /auth/wallet/challenge   # Get SIWE challenge
-POST   /auth/wallet/verify      # Verify wallet signature
-GET    /auth/oauth/:provider    # Initiate OAuth flow
-GET    /auth/oauth/callback     # OAuth callback
-POST   /auth/refresh            # Refresh access token
-POST   /auth/logout             # Logout (invalidate tokens)
-POST   /auth/cli/start          # Start CLI login session
-POST   /auth/cli/poll           # Poll CLI session status
-POST   /auth/cli/approve        # Approve CLI login from web
-```
-
-### Account Management
-
-```
-GET    /account/profile         # Get user profile
-PATCH  /account/profile         # Update profile
-GET    /account/methods         # List linked auth methods
-POST   /account/methods/link    # Link new auth method
-DELETE /account/methods/:id     # Unlink auth method
-```
-
-### Personal Access Tokens
-
-```
-GET    /tokens                  # List PATs
-POST   /tokens                  # Create PAT
-DELETE /tokens/:id              # Revoke PAT
-POST   /tokens/validate         # Validate PAT (service-to-service)
-```
-
-### Organizations
-
-```
-GET    /organizations           # List user's orgs
-POST   /organizations           # Create org
-GET    /organizations/:id       # Get org details
-PATCH  /organizations/:id       # Update org
-DELETE /organizations/:id       # Delete org
-```
-
-### Billing
-
-```
-GET    /billing/customer        # Get billing customer
-POST   /billing/subscriptions   # Create subscription
-GET    /billing/subscriptions   # List subscriptions
-GET    /billing/invoices        # List invoices
-GET    /billing/usage           # Get usage summary
-POST   /billing/payment-methods # Add payment method
-POST   /billing/credits/topup   # Top up credits wallet
-GET    /billing/credits/balance # Get credits balance
-GET    /billing/credits/ledger  # Get usage ledger
-POST   /billing/webhook         # Stripe webhook
-```
+### Organizations & Billing
+- Org CRUD, membership, roles
+- Stripe subscriptions (seat-based) + credits wallet with idempotent ledger
+- Payment methods, invoices, usage tracking
+- Stripe Connect transfers
 
 ### AI Inference Proxy
+Single endpoint, 11 providers, per-token billing deducted from credits wallet:
 
-```
-POST   /ai/openai/*             # OpenAI proxy
-POST   /ai/anthropic/*          # Anthropic proxy
-POST   /ai/groq/*               # Groq proxy
-POST   /ai/together/*           # Together AI proxy
-POST   /ai/deepseek/*           # DeepSeek proxy
-POST   /ai/openrouter/*         # OpenRouter proxy
-POST   /ai/xai/*                # xAI proxy
-POST   /ai/stability/*          # Stability AI proxy
-POST   /ai/elevenlabs/*         # ElevenLabs proxy
-POST   /ai/fal-ai/*             # Fal AI proxy
-POST   /ai/worldlabs/*          # World Labs proxy
-```
+`OpenAI · Anthropic · Groq · Together · DeepSeek · OpenRouter · xAI · Stability · ElevenLabs · Fal AI · World Labs`
 
-## Project Structure
+---
 
-```
-service-auth/
-├── src/
-│   ├── routes/
-│   │   ├── auth/           # Authentication (email, sms, wallet, oauth, cli, session)
-│   │   ├── account/        # Profile + auth methods
-│   │   ├── tokens/         # PAT management
-│   │   ├── organizations/  # Org CRUD + membership
-│   │   ├── billing/        # Subscriptions, credits, payments, webhooks
-│   │   └── ai/             # AI inference proxy (11 providers + cost metering)
-│   ├── services/
-│   │   ├── db.service.ts       # Database operations (Prisma)
-│   │   ├── jwt.service.ts      # JWT generation/validation
-│   │   ├── token.service.ts    # PAT encryption/validation
-│   │   ├── email.service.ts    # Email sending (Resend)
-│   │   ├── sms.service.ts      # SMS sending (Twilio)
-│   │   ├── oauth.service.ts    # OAuth provider flows
-│   │   ├── siwe.service.ts     # Sign-In with Ethereum
-│   │   ├── secrets.service.ts  # Infisical integration
-│   │   ├── rateLimiter.service.ts
-│   │   └── payments/           # Stripe, Stax, Relay providers
-│   ├── middleware/
-│   │   ├── auth.ts             # JWT verification middleware
-│   │   ├── ratelimit.ts        # Rate limiting
-│   │   └── cors.ts             # CORS configuration
-│   ├── utils/
-│   │   ├── crypto.ts           # Encryption/hashing, timing-safe compare
-│   │   ├── otp.ts              # OTP generation
-│   │   ├── logger.ts           # Structured logging
-│   │   └── validators.ts       # Input validation (Zod)
-│   └── index.ts                # Main entry point (Hono app)
-├── prisma/
-│   └── schema.prisma           # Database schema (PostgreSQL)
-├── .env.example                # Environment variables template
-├── tsconfig.json
-└── package.json
-```
+## API Routes
+
+| Group | Prefix | Purpose |
+|-------|--------|---------|
+| Auth | `/auth/email`, `/auth/sms`, `/auth/wallet`, `/auth/oauth` | Login flows |
+| Session | `/auth/refresh`, `/auth/logout`, `/auth/cli/*` | Token management |
+| Account | `/account/profile`, `/account/methods` | Profile + linked methods |
+| Tokens | `/tokens` | PAT CRUD + validation |
+| Orgs | `/organizations` | Org CRUD + membership |
+| Billing | `/billing/subscriptions`, `/billing/credits/*`, `/billing/webhook` | Stripe integration |
+| AI | `/ai/openai/*`, `/ai/anthropic/*`, ... | Inference proxy |
+
+---
+
+## Tech Stack
+
+| Layer | Tech |
+|-------|------|
+| Runtime | Node.js |
+| Framework | Hono |
+| Database | PostgreSQL + Prisma |
+| Email | Resend |
+| SMS | Twilio |
+| Payments | Stripe |
+| Web3 | ethers.js, @noble/secp256k1 |
+| Secrets | Infisical (production) |
+
+---
 
 ## Environment Variables
 
@@ -206,18 +90,21 @@ See `.env.example` for the full list. Key variables:
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `DATABASE_URL` | Yes | PostgreSQL connection string |
-| `JWT_SECRET` | Yes (production) | Access token signing secret — **process crashes if unset in production** |
-| `JWT_REFRESH_SECRET` | Yes (production) | Refresh token signing secret — **process crashes if unset in production** |
-| `RESEND_API_KEY` | Yes | Email delivery via Resend |
-| `TWILIO_ACCOUNT_SID` | For SMS | Twilio account SID |
-| `TWILIO_AUTH_TOKEN` | For SMS | Twilio auth token |
-| `TWILIO_PHONE_NUMBER` | For SMS | Twilio sender number |
+| `JWT_SECRET` | Yes | Access token signing secret |
+| `JWT_REFRESH_SECRET` | Yes | Refresh token signing secret |
+| `RESEND_API_KEY` | Yes | Email delivery |
 | `STRIPE_SECRET_KEY` | For billing | Stripe API key |
-| `STRIPE_WEBHOOK_SECRET` | For billing | Stripe webhook signing secret |
-| `TOKEN_ENCRYPTION_KEY` | Recommended | PAT encryption key (falls back to JWT_SECRET) |
-| `REDIS_URL` | Recommended | Redis for rate limiting (in-memory fallback warns in production) |
-| `INFISICAL_CLIENT_ID` | Production | Infisical secrets management |
+| `STRIPE_WEBHOOK_SECRET` | For billing | Stripe webhook signing |
+| `AUTH_INTROSPECTION_SECRET` | Yes | Shared secret with service-cloud-api |
 
-## License
+---
 
-MIT
+## Related
+
+- [service-cloud-api](https://github.com/alternatefutures/service-cloud-api) — GraphQL API
+- [web-app](https://github.com/alternatefutures/web-app.alternatefutures.ai) — Dashboard
+- [package-cloud-cli](https://github.com/alternatefutures/package-cloud-cli) — CLI
+
+---
+
+MIT License
