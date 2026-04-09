@@ -1,6 +1,6 @@
-# Alternate Futures App - Claude Code Initialization
+# Alternate Clouds App - Claude Code Initialization
 
-This file contains **mandatory** workflow rules and checklists for working on the Alternate Futures App. These are not suggestions - they are requirements that MUST be followed.
+This file contains **mandatory** workflow rules and checklists for working on the Alternate Clouds App. These are not suggestions - they are requirements that MUST be followed.
 
 ---
 
@@ -427,4 +427,4 @@ See `DEPLOY_ARWEAVE.md` for deployment to Arweave using Turbo CLI.
 
 - **Task**: ALT-32 - Build Custom Authentication System
 - **Repo**: github.com/alternatefutures/alternatefutures-auth
-- **Stack**: Hono, TypeScript, Alternate Futures Functions
+- **Stack**: Hono, TypeScript, Alternate Clouds Functions

@@ -6,7 +6,7 @@ const prisma = new PrismaClient();
 const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY || '';
 
 /**
- * Alternate Futures subscription plans (2026-02-14)
+ * Alternate Clouds subscription plans (2026-02-14)
  *
  * Pricing model:
  *   - Monthly: $25/seat/month, 25% markup on usage
@@ -28,7 +28,7 @@ const subscriptionPlans = [
     trialDays: 30,
     features: JSON.stringify([]),
     stripe: {
-      productName: 'Alternate Futures Monthly',
+      productName: 'Alternate Clouds Monthly',
       unitAmount: 2500,
       interval: 'month' as const,
     },
@@ -42,7 +42,7 @@ const subscriptionPlans = [
     trialDays: 30,
     features: JSON.stringify([]),
     stripe: {
-      productName: 'Alternate Futures Yearly',
+      productName: 'Alternate Clouds Yearly',
       unitAmount: 24000, // $240/year
       interval: 'year' as const,
     },

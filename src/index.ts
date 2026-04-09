@@ -78,7 +78,7 @@ app.get('/health/db', async (c) => {
 // Root endpoint
 app.get('/', (c) => {
   return c.json({
-    service: 'Alternate Futures Authentication Service',
+    service: 'Alternate Clouds Authentication Service',
     version: '0.1.0',
     endpoints: {
       health: '/health',
@@ -221,7 +221,7 @@ app.onError((err, c) => {
 
 const port = parseInt(process.env.PORT || '1601');
 
-console.log(`🚀 Alternate Futures Auth Service starting on port ${port}`);
+console.log(`🚀 Alternate Clouds Auth Service starting on port ${port}`);
 
 // For edge runtimes (Cloudflare Workers, Bun, Deno)
 export default {

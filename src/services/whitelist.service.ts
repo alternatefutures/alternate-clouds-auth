@@ -34,7 +34,7 @@ class WhitelistService {
         status: 403,
         body: {
           error: 'access_restricted',
-          message: 'AlternateFutures is currently in early access. You\'ll need an invite to sign in.',
+          message: 'Alternate Clouds is currently in early access. You\'ll need an invite to sign in.',
         },
       };
     }

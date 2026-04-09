@@ -15,7 +15,7 @@
 
 ## Introduction
 
-Alternate Futures Auth Service ("we", "our", "the service") is a **privacy-focused, open-source authentication system**. This policy explains what data we collect, why, and your rights.
+Alternate Clouds Auth Service ("we", "our", "the service") is a **privacy-focused, open-source authentication system**. This policy explains what data we collect, why, and your rights.
 
 **Philosophy**: We believe privacy is a fundamental human right. We collect the absolute minimum data necessary to provide authentication services.
 
@@ -249,7 +249,7 @@ Audit our code yourself:
 
 **Mailing Address**:
 ```
-Alternate Futures
+Alternate Clouds
 [Address TBD]
 ```
 

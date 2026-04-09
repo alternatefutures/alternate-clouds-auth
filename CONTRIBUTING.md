@@ -1,4 +1,4 @@
-# Contributing to Alternate Futures Auth Service
+# Contributing to Alternate Clouds Auth Service
 
 First off, thank you for considering contributing to our privacy-focused, censorship-resistant authentication service! 🎉
 

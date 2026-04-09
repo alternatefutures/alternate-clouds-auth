@@ -1,12 +1,12 @@
-# Alternate Futures Authentication Service
+# Alternate Clouds Authentication Service
 
 ## What is this project?
 
-A standalone multi-method authentication service for the Alternate Futures platform. Supports passwordless email/SMS, Web3 wallets, and social OAuth providers with JWT-based sessions and account linking.
+A standalone multi-method authentication service for the Alternate Clouds platform. Supports passwordless email/SMS, Web3 wallets, and social OAuth providers with JWT-based sessions and account linking.
 
 ## Tech Stack
 
-- **Runtime**: Alternate Futures Functions
+- **Runtime**: Alternate Clouds Functions
 - **Framework**: Hono (edge-compatible)
 - **Database**: SQLite (Turso compatible)
 - **Language**: TypeScript 5.4
@@ -149,10 +149,10 @@ See `.env.example` for full list.
 
 ## Deployment
 
-This service is designed to be deployed as an **Alternate Futures Function**. Once the AF Functions platform is ready, this authentication service will be one of the first production deployments on the platform.
+This service is designed to be deployed as an **Alternate Clouds Function**. Once the AF Functions platform is ready, this authentication service will be one of the first production deployments on the platform.
 
 ### Deployment Target
-- **Primary**: Alternate Futures Functions platform
+- **Primary**: Alternate Clouds Functions platform
 - **Development**: Node.js for local testing
 
 ## Security Considerations

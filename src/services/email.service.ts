@@ -84,7 +84,7 @@ export class EmailService {
       return;
     }
 
-    const subject = 'Your Alternate Futures Verification Code';
+    const subject = 'Your Alternate Clouds Verification Code';
     const text = `Your verification code is: ${code}\n\nThis code will expire in 10 minutes.\n\nIf you didn't request this code, please ignore this email.`;
     const html = `
       <!DOCTYPE html>
@@ -106,7 +106,7 @@ export class EmailService {
             <p>This code will expire in <strong>10 minutes</strong>.</p>
             <p>If you didn't request this code, please ignore this email.</p>
             <div class="footer">
-              <p>© ${new Date().getFullYear()} Alternate Futures. All rights reserved.</p>
+              <p>© ${new Date().getFullYear()} Alternate Clouds. All rights reserved.</p>
             </div>
           </div>
         </body>
@@ -120,7 +120,7 @@ export class EmailService {
    * Send magic link email
    */
   async sendMagicLink(email: string, magicLink: string): Promise<void> {
-    const subject = 'Sign in to Alternate Futures';
+    const subject = 'Sign in to Alternate Clouds';
     const text = `Click the link below to sign in:\n\n${magicLink}\n\nThis link will expire in 15 minutes.\n\nIf you didn't request this link, please ignore this email.`;
     const html = `
       <!DOCTYPE html>
@@ -136,7 +136,7 @@ export class EmailService {
         </head>
         <body>
           <div class="container">
-            <h2>Sign in to Alternate Futures</h2>
+            <h2>Sign in to Alternate Clouds</h2>
             <p>Click the button below to sign in:</p>
             <a href="${magicLink}" class="button">Sign In</a>
             <p>Or copy and paste this link into your browser:</p>
@@ -144,7 +144,7 @@ export class EmailService {
             <p>This link will expire in <strong>15 minutes</strong>.</p>
             <p>If you didn't request this link, please ignore this email.</p>
             <div class="footer">
-              <p>© ${new Date().getFullYear()} Alternate Futures. All rights reserved.</p>
+              <p>© ${new Date().getFullYear()} Alternate Clouds. All rights reserved.</p>
             </div>
           </div>
         </body>
@@ -159,7 +159,7 @@ export class EmailService {
       return;
     }
 
-    const subject = `[Alternate Futures] Your trial has ended — ${gracedays} days to subscribe`;
+    const subject = `[Alternate Clouds] Your trial has ended — ${gracedays} days to subscribe`;
     const html = `
       <!DOCTYPE html>
       <html>
@@ -168,7 +168,7 @@ export class EmailService {
           <div style="max-width: 600px; margin: 0 auto; padding: 20px;">
             <h2 style="color: #f59e0b;">Your Trial Has Ended</h2>
             <p>Hi,</p>
-            <p>Your 30-day trial for <strong>${orgName}</strong> on Alternate Futures has ended.</p>
+            <p>Your 30-day trial for <strong>${orgName}</strong> on Alternate Clouds has ended.</p>
             <p>You have <strong>${gracedays} days</strong> to subscribe before your access is suspended.
             During this grace period, all features remain available.</p>
             <a href="https://app.alternatefutures.ai/org/${orgId}/billing"
@@ -181,7 +181,7 @@ export class EmailService {
               will be disabled until you subscribe.
             </p>
             <div style="font-size: 12px; color: #666; margin-top: 40px; border-top: 1px solid #eee; padding-top: 16px;">
-              <p>&copy; ${new Date().getFullYear()} Alternate Futures. All rights reserved.</p>
+              <p>&copy; ${new Date().getFullYear()} Alternate Clouds. All rights reserved.</p>
             </div>
           </div>
         </body>
@@ -202,7 +202,7 @@ export class EmailService {
       return;
     }
 
-    const subject = `[Alternate Futures] Your access has been suspended`;
+    const subject = `[Alternate Clouds] Your access has been suspended`;
     const html = `
       <!DOCTYPE html>
       <html>
@@ -224,7 +224,7 @@ export class EmailService {
               will be restored.
             </p>
             <div style="font-size: 12px; color: #666; margin-top: 40px; border-top: 1px solid #eee; padding-top: 16px;">
-              <p>&copy; ${new Date().getFullYear()} Alternate Futures. All rights reserved.</p>
+              <p>&copy; ${new Date().getFullYear()} Alternate Clouds. All rights reserved.</p>
             </div>
           </div>
         </body>
@@ -234,7 +234,7 @@ export class EmailService {
     await this.sendEmail({
       to: email,
       subject,
-      text: `Your access to ${orgName} on Alternate Futures has been suspended. Subscribe at https://app.alternatefutures.ai/org/${orgId}/billing to restore access.`,
+      text: `Your access to ${orgName} on Alternate Clouds has been suspended. Subscribe at https://app.alternatefutures.ai/org/${orgId}/billing to restore access.`,
       html,
     });
   }

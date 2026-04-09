@@ -1,4 +1,4 @@
-# Alternate Futures Authentication Service
+# Alternate Clouds Authentication Service
 
 [![Tests](https://github.com/alternatefutures/service-auth/actions/workflows/test.yml/badge.svg)](https://github.com/alternatefutures/service-auth/actions/workflows/test.yml)
 
