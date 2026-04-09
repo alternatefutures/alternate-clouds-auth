@@ -4,7 +4,7 @@
  */
 
 import { Hono } from 'hono';
-import { authMiddleware, requireAuthUser } from '../../middleware/auth';
+import { requireAuthUser } from '../../middleware/auth';
 import {
   checkBalance,
   getOrgBillingFromRequest,
@@ -16,8 +16,6 @@ const app = new Hono();
 
 const FAL_KEY = process.env.FAL_KEY;
 const FAL_BASE_URL = 'https://fal.run';
-
-app.use('*', authMiddleware);
 
 app.options('/*', (c) => c.text('', 204));
 

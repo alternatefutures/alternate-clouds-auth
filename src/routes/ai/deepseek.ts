@@ -4,7 +4,7 @@
  */
 
 import { Hono } from 'hono';
-import { authMiddleware, requireAuthUser } from '../../middleware/auth';
+import { requireAuthUser } from '../../middleware/auth';
 import {
   calculateTokenCost,
   checkBalance,
@@ -19,8 +19,6 @@ const app = new Hono();
 
 const DEEPSEEK_API_KEY = process.env.DEEPSEEK_API_KEY;
 const DEEPSEEK_BASE_URL = 'https://api.deepseek.com/v1';
-
-app.use('*', authMiddleware);
 
 app.options('/*', (c) => c.text('', 204));
 

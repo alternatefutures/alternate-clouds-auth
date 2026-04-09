@@ -4,7 +4,7 @@
  */
 
 import { Hono } from 'hono';
-import { authMiddleware, requireAuthUser } from '../../middleware/auth';
+import { requireAuthUser } from '../../middleware/auth';
 import {
   checkBalance,
   getOrgBillingFromRequest,
@@ -16,8 +16,6 @@ const app = new Hono();
 
 const WORLDLABS_API_KEY = process.env.WORLDLABS_API_KEY;
 const WORLDLABS_BASE_URL = 'https://api.worldlabs.ai/v1';
-
-app.use('*', authMiddleware);
 
 app.options('/*', (c) => c.text('', 204));
 

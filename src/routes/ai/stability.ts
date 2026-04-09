@@ -4,7 +4,7 @@
  */
 
 import { Hono } from 'hono';
-import { authMiddleware, requireAuthUser } from '../../middleware/auth';
+import { requireAuthUser } from '../../middleware/auth';
 import {
   checkBalance,
   getOrgBillingFromRequest,
@@ -16,8 +16,6 @@ const app = new Hono();
 
 const STABILITY_API_KEY = process.env.STABILITY_API_KEY;
 const STABILITY_BASE_URL = 'https://api.stability.ai/v2beta';
-
-app.use('*', authMiddleware);
 
 app.options('/*', (c) => c.text('', 204));
 
