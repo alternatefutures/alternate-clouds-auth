@@ -21,6 +21,7 @@ import organizationsRoutes from './routes/organizations';
 import aiRoutes from './routes/ai';
 import v1Routes from './routes/ai/v1';
 import whitelistRoutes from './routes/admin/whitelist';
+import adminUsersRoutes from './routes/admin/users';
 import testRoutes from './routes/internal/test';
 import { startTrialScheduler, stopTrialScheduler } from './services/trialScheduler';
 
@@ -189,6 +190,7 @@ app.route('/organizations', organizationsRoutes);
 
 // Mount admin routes (protected by introspection secret)
 app.route('/admin/whitelist', whitelistRoutes);
+app.route('/admin/users', adminUsersRoutes);
 
 // Mount dev/test endpoints (disabled in production inside the route handler)
 app.route('/internal/test', testRoutes);
