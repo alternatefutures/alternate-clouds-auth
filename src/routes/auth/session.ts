@@ -6,6 +6,10 @@ import { authMiddleware, requireAuthUser } from '../../middleware/auth';
 import { standardRateLimit } from '../../middleware/ratelimit';
 import { auditLogService } from '../../services/auditLog.service';
 import { generateDeviceFingerprint } from '../../utils/fingerprint';
+import {
+  getReplayedRefreshResponse,
+  rememberRefreshResponse,
+} from '../../services/refreshReplayCache';
 
 const app = new Hono();
 
@@ -19,6 +23,19 @@ app.post('/refresh', standardRateLimit, async (c) => {
   try {
     const body = await c.req.json();
     const { refreshToken } = refreshTokenSchema.parse(body);
+
+    // Rotation race short-circuit: if this exact refresh token was just
+    // successfully rotated within the last ~15s, return the same rotated
+    // response instead of re-rotating (which would either burn another
+    // rotation needlessly or, worse, trip reuse detection on the third+
+    // parallel caller). See `services/refreshReplayCache.ts` for why this
+    // exists. MUST run before the JWT/session checks so a stale token
+    // presented by a parallel caller never reaches the reuse-detection
+    // branch below.
+    const replayed = getReplayedRefreshResponse(refreshToken);
+    if (replayed) {
+      return c.json(replayed as Record<string, unknown>);
+    }
 
     const payload = jwtService.verifyRefreshToken(refreshToken);
 
@@ -39,6 +56,10 @@ app.post('/refresh', standardRateLimit, async (c) => {
     // SECURITY: Verify the presented refresh token hash matches the stored hash.
     // If it doesn't match, a previously-rotated token is being replayed — revoke the
     // entire token family to invalidate all sessions derived from this lineage.
+    //
+    // Note: a benign concurrent rotation from the same session is caught earlier
+    // by the replay cache above; reaching this branch means either the token
+    // was rotated >15s ago (genuine replay attempt) or it was never issued.
     if (!dbService.verifyRefreshTokenHash(refreshToken, session.refresh_token)) {
       const revokedCount = await dbService.revokeTokenFamily(session.token_family);
       await auditLogService.logFromContext(c, {
@@ -94,7 +115,7 @@ app.post('/refresh', standardRateLimit, async (c) => {
       });
     }
 
-    return c.json({
+    const responseBody = {
       success: true,
       accessToken: newAccessToken,
       refreshToken: newRefreshToken,
@@ -104,7 +125,15 @@ app.post('/refresh', standardRateLimit, async (c) => {
         displayName: user.display_name,
         avatarUrl: user.avatar_url,
       },
-    });
+    };
+
+    // Cache keyed by the OLD (presented) token so any in-flight parallel
+    // caller from the same session that arrives in the next ~15s gets the
+    // same rotated tokens back instead of triggering another rotation /
+    // family revoke. Only cache successful rotations.
+    rememberRefreshResponse(refreshToken, responseBody);
+
+    return c.json(responseBody);
   } catch (error) {
     console.error('Refresh token error:', error);
 

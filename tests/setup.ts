@@ -17,9 +17,14 @@ beforeEach(() => {
   process.env.JWT_EXPIRES_IN = '15m';
   process.env.JWT_REFRESH_EXPIRES_IN = '7d';
 
-  // Reset database to fresh state for each test
-  // This ensures complete isolation between tests
-  dbService.reset(':memory:');
+  // Reset database to fresh state for each test if the helper exists.
+  // The Prisma migration removed `dbService.reset()`; DB-dependent route tests
+  // are pre-existing broken (need a separate test-DB fixture). Pure unit tests
+  // (services/utils) don't need a DB and should still run.
+  const maybeReset = (dbService as unknown as { reset?: (url: string) => void }).reset;
+  if (typeof maybeReset === 'function') {
+    maybeReset.call(dbService, ':memory:');
+  }
 });
 
 // Cleanup after each test (optional, but good practice)
