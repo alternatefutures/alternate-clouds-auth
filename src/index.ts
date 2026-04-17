@@ -24,6 +24,7 @@ import v1Routes from './routes/ai/v1';
 import whitelistRoutes from './routes/admin/whitelist';
 import adminUsersRoutes from './routes/admin/users';
 import testRoutes from './routes/internal/test';
+import internalAuditRoutes from './routes/internal/audit';
 import { startTrialScheduler, stopTrialScheduler } from './services/trialScheduler';
 
 // Initialize secrets before anything else
@@ -200,6 +201,7 @@ app.route('/admin/users', adminUsersRoutes);
 
 // Mount dev/test endpoints (disabled in production inside the route handler)
 app.route('/internal/test', testRoutes);
+app.route('/internal/audit', internalAuditRoutes);
 
 // Mount AI inference proxy routes
 app.route('/ai', aiRoutes);
