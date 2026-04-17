@@ -669,3 +669,51 @@ model OrganizationUsageCostsPrivate {
   @@index([orgBillingId, createdAt])
   @@map("organization_usage_costs_private")
 }
+
+// ============================================
+// AUDIT LOG (Phase 44)
+// ============================================
+// Identity + billing half of the platform audit log. An identical model
+// lives in service-cloud-api for deployment / health / provider events.
+// Schemas are kept in lockstep on purpose — the D3 export cron unifies
+// both halves into one JSONL stream for forensics / audits of the first
+// 100 users. Append-only. Never mutate existing rows.
+//
+// Privacy contract enforced by the audit() writer, not here:
+//   - payload never contains raw secrets, JWT contents, plaintext passwords,
+//     payment-card numbers, or OAuth tokens.
+//   - contact info (email, phone) is hashed when it would identify a user
+//     who has not yet associated with an org.
+model AuditEvent {
+  id           String   @id @default(cuid())
+  timestamp    DateTime @default(now()) @map("timestamp")
+
+  traceId      String   @map("trace_id")
+
+  source       String
+  category     String
+  action       String
+  status       String
+
+  userId       String?  @map("user_id")
+  orgId        String?  @map("org_id")
+  projectId    String?  @map("project_id")
+  serviceId    String?  @map("service_id")
+  deploymentId String?  @map("deployment_id")
+
+  durationMs   Int?     @map("duration_ms")
+  payload      Json
+
+  errorCode    String?  @map("error_code")
+  errorMessage String?  @map("error_message")
+
+  @@index([userId, timestamp])
+  @@index([orgId, timestamp])
+  @@index([projectId, timestamp])
+  @@index([serviceId, timestamp])
+  @@index([category, timestamp])
+  @@index([action, timestamp])
+  @@index([traceId])
+  @@index([status, timestamp])
+  @@map("audit_events")
+}
