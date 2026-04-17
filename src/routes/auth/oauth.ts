@@ -8,6 +8,7 @@ import { standardRateLimit } from '../../middleware/ratelimit';
 import { encryptForStorage, generateCodeVerifier, generateCodeChallenge } from '../../utils/crypto';
 import { whitelistService } from '../../services/whitelist.service';
 import { auditLogService } from '../../services/auditLog.service';
+import { audit } from '../../lib/audit';
 import { generateDeviceFingerprint } from '../../utils/fingerprint';
 
 const app = new Hono();
@@ -259,6 +260,14 @@ app.get('/callback/:provider', async (c) => {
         userId: user.id,
         orgSlug,
         orgName: `${orgName}'s Org`,
+      });
+
+      audit(dbService.prismaClient, {
+        category: 'user',
+        action: 'user.signup',
+        status: 'ok',
+        userId: user.id,
+        payload: { method: 'oauth', provider },
       });
     }
 

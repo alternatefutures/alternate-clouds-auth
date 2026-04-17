@@ -11,6 +11,7 @@ import { strictRateLimit } from '../../middleware/ratelimit';
 import { timingSafeCompare } from '../../utils/crypto';
 import { whitelistService } from '../../services/whitelist.service';
 import { auditLogService } from '../../services/auditLog.service';
+import { audit } from '../../lib/audit';
 import { generateDeviceFingerprint } from '../../utils/fingerprint';
 
 const app = new Hono();
@@ -151,8 +152,25 @@ app.post('/verify', strictRateLimit, async (c) => {
         });
       } catch (orgError: any) {
         console.error(`[sms-onboard] Org creation failed for user ${user.id}:`, orgError?.message || orgError);
+        audit(dbService.prismaClient, {
+          category: 'user',
+          action: 'user.signup',
+          status: 'error',
+          userId: user.id,
+          errorCode: orgError?.code,
+          errorMessage: orgError?.message ?? String(orgError),
+          payload: { method: 'sms', step: 'default_org_create' },
+        });
         return c.json({ error: 'Account setup failed. Please try again.' }, 500);
       }
+
+      audit(dbService.prismaClient, {
+        category: 'user',
+        action: 'user.signup',
+        status: 'ok',
+        userId: user.id,
+        payload: { method: 'sms' },
+      });
     } else {
       // Update existing user
       await dbService.updateUser(user.id, {

@@ -10,6 +10,7 @@ dotenvConfig({ path: path.join(serviceRoot, '.env.local'), override: true });
 import { Hono } from 'hono';
 import { logger } from 'hono/logger';
 import { corsMiddleware, devCorsMiddleware } from './middleware/cors';
+import { traceMiddleware } from './middleware/trace';
 import { secretsService } from './services/secrets.service';
 import { initializePaymentProviders } from './services/payments';
 import { dbService } from './services/db.service';
@@ -49,6 +50,11 @@ initializePaymentProviders({
 const app = new Hono();
 
 // Middleware
+// Phase 44/D2: trace middleware runs FIRST so every downstream handler,
+// db write, and audit() call sees the same trace id. Order matters:
+// putting logger() before this one would give the logger a different id
+// from the one we echo to clients and record in audit events.
+app.use('*', traceMiddleware);
 app.use('*', logger());
 
 // Use appropriate CORS middleware based on environment

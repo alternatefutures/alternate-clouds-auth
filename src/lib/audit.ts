@@ -15,8 +15,8 @@
  * Contract: fire-and-forget, never throws, never blocks the caller.
  */
 
-import { randomUUID } from 'node:crypto'
 import type { PrismaClient, Prisma } from '@prisma/client'
+import { currentTraceId as contextTraceId } from './requestContext'
 
 export type AuditStatus = 'ok' | 'warn' | 'error'
 
@@ -57,7 +57,9 @@ export function audit(prisma: PrismaClient, evt: AuditEventInput): void {
   try {
     const payload = sanitize(evt.payload ?? {}) as Prisma.InputJsonValue
     const data: Prisma.AuditEventUncheckedCreateInput = {
-      traceId: evt.traceId ?? randomUUID(),
+      // Trace id precedence: explicit arg → current request context
+      // (populated by src/middleware/trace.ts) → fresh uuid.
+      traceId: evt.traceId ?? contextTraceId(),
       source: evt.source ?? DEFAULT_SOURCE,
       category: evt.category,
       action: evt.action,
