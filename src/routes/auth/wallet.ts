@@ -9,6 +9,7 @@ import { walletChallengeRequestSchema, walletVerifySchema, validateSolanaAddress
 import { strictRateLimit } from '../../middleware/ratelimit';
 import { whitelistService } from '../../services/whitelist.service';
 import { auditLogService } from '../../services/auditLog.service';
+import { audit } from '../../lib/audit';
 import { generateDeviceFingerprint } from '../../utils/fingerprint';
 
 const app = new Hono();
@@ -204,6 +205,14 @@ app.post('/verify', strictRateLimit, async (c) => {
         userId: user.id,
         orgSlug,
         orgName: `${shortAddress}'s Org`,
+      });
+
+      audit(dbService.prismaClient, {
+        category: 'user',
+        action: 'user.signup',
+        status: 'ok',
+        userId: user.id,
+        payload: { method: 'wallet', walletShort: shortAddress },
       });
     }
 
