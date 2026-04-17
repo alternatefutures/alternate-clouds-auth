@@ -472,6 +472,17 @@ export class DatabaseService {
   }
 
   /**
+   * Exposes the underlying Prisma client for modules that need to query
+   * tables outside the DatabaseService wrapper (e.g. `audit()` writes in
+   * `src/lib/audit.ts`, ad-hoc scripts, debug tooling). Keep callers to a
+   * minimum — prefer adding explicit methods to this class when the access
+   * pattern is reused.
+   */
+  get prismaClient(): PrismaClient {
+    return this.prisma;
+  }
+
+  /**
    * Initialize connection and seed default data
    */
   async initialize(): Promise<void> {
