@@ -89,9 +89,12 @@ jobs:
 
       - name: Install trivy
         if: ${{ env.SUPPLY_CHAIN_DISABLED != 'true' }}
-        uses: aquasecurity/setup-trivy@v0.2.0
-        with:
-          version: v0.56.2
+        env:
+          TRIVY_VERSION: "0.56.2"
+        run: |
+          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
+            | sh -s -- -b /usr/local/bin "v${TRIVY_VERSION}"
+          trivy --version
 
       - name: Sign image with cosign (keyless / Sigstore OIDC)
         if: ${{ env.SUPPLY_CHAIN_DISABLED != 'true' }}
