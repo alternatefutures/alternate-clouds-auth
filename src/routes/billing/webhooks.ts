@@ -7,6 +7,10 @@ import { Hono } from 'hono';
 import { nanoid } from 'nanoid';
 import { dbService } from '../../services/db.service';
 import { getProvider, isProviderAvailable } from '../../services/payments';
+import {
+  isChainVerifyRequired,
+  verifyRelayPaymentOnChain,
+} from '../../services/payments/relayChainVerifier';
 import { processTopupFromWebhook } from './credits';
 
 const app = new Hono();
@@ -617,6 +621,40 @@ async function processRelayEvent(event: WebhookEvent): Promise<void> {
   switch (event.type) {
     case 'payment.completed': {
       const txHash = data.txHash as string;
+
+      // Independently verify the on-chain transaction before crediting
+      // anyone. The webhook HMAC is necessary but not sufficient — if
+      // the shared secret leaks, an attacker can forge `payment.completed`
+      // events. Chain verification is the second factor.
+      const chainVerifyRequired = isChainVerifyRequired();
+      const verification = await verifyRelayPaymentOnChain({
+        txHash,
+        chainId: Number(data.chainId ?? 0),
+        expectedToAddress: String(data.toAddress ?? ''),
+        expectedAmountCents: Math.round(parseFloat(String(data.amount ?? '0')) * 100),
+        tokenSymbol: typeof data.tokenSymbol === 'string' ? data.tokenSymbol : undefined,
+        tokenAddress: typeof data.tokenAddress === 'string' ? data.tokenAddress : undefined,
+      });
+      if (!verification.ok) {
+        const logCtx = {
+          txHash,
+          chainId: data.chainId,
+          reason: verification.reason,
+          details: verification.details,
+        };
+        if (chainVerifyRequired) {
+          console.error('Relay payment.completed REJECTED — chain verification failed', logCtx);
+          // Throw so the outer handler returns 500 and Relay retries.
+          // If the rejection was correct (forged event) the retries
+          // will keep failing, which is the desired outcome.
+          throw new Error(`relay_chain_verify_failed:${verification.reason}`);
+        }
+        console.warn(
+          'Relay chain verification failed but RELAY_REQUIRE_CHAIN_VERIFY=false — proceeding (KILL SWITCH ACTIVE)',
+          logCtx,
+        );
+      }
+
       const payment = await dbService.getPaymentByTxHash(txHash);
       if (payment) {
         if (payment.status === 'SUCCEEDED') {
