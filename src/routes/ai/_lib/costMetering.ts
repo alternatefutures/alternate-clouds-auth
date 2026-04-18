@@ -90,6 +90,223 @@ export function calculateTokenCost(
 }
 
 // ============================================
+// SERVER-SIDE MIN-BALANCE & WORST-CASE ESTIMATION
+// ============================================
+//
+// These helpers replace the legacy `X-Min-Balance-Cents` header. The header
+// was user-controlled, so a caller could trivially set `X-Min-Balance-Cents: 1`
+// and bypass the pre-flight balance gate even when the request was guaranteed
+// to debit far more than the user's remaining balance — leaving the system
+// holding the bag for the upstream provider's bill.
+//
+// We now compute the worst-case cost server-side from the request body and
+// the model's published per-token pricing.
+
+/**
+ * Approximate token count from a string of text. Use 4 chars / token as a
+ * rough universal heuristic — accurate enough for *gating* (we want to err
+ * on the high side) without dragging tiktoken into hot path.
+ */
+const CHARS_PER_TOKEN = 4;
+
+/**
+ * Default cap when the request omits `max_tokens`. Most providers will
+ * happily generate up to their context-window output limit if unset, so we
+ * have to assume a generous cap. 4096 is the common modern default and is
+ * comfortably below most context windows. Override per-route if needed.
+ */
+const DEFAULT_MAX_OUTPUT_TOKENS = 4096;
+
+/** Absolute floor for any min-balance check, in cents. */
+const MIN_BALANCE_FLOOR_CENTS = 1;
+
+function pickInteger(value: unknown): number | null {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) return null;
+  return Math.floor(value);
+}
+
+function countCharsInChatMessages(messages: unknown): number {
+  if (!Array.isArray(messages)) return 0;
+  let chars = 0;
+  for (const m of messages) {
+    if (!m || typeof m !== 'object') continue;
+    const content = (m as Record<string, unknown>).content;
+    if (typeof content === 'string') {
+      chars += content.length;
+    } else if (Array.isArray(content)) {
+      for (const part of content) {
+        if (part && typeof part === 'object') {
+          const t = (part as Record<string, unknown>).text;
+          if (typeof t === 'string') chars += t.length;
+        }
+      }
+    }
+  }
+  return chars;
+}
+
+function countCharsInAnthropicSystem(system: unknown): number {
+  if (typeof system === 'string') return system.length;
+  if (Array.isArray(system)) {
+    let chars = 0;
+    for (const part of system) {
+      if (part && typeof part === 'object') {
+        const t = (part as Record<string, unknown>).text;
+        if (typeof t === 'string') chars += t.length;
+      }
+    }
+    return chars;
+  }
+  return 0;
+}
+
+/**
+ * Estimate the worst-case input/output token counts for a chat-style
+ * request body (OpenAI- or Anthropic-shaped). Used for both:
+ *   1. The pre-flight min-balance gate (`estimateChatRequestMaxCostCents`).
+ *   2. The streaming-fallback bill when usage events never arrived.
+ */
+export function estimateChatWorstCaseUsage(
+  body: Record<string, unknown>,
+  modelId: string,
+): UsageInfo {
+  const inputChars =
+    countCharsInChatMessages(body.messages) +
+    countCharsInAnthropicSystem(body.system);
+
+  const inputTokens = Math.ceil(inputChars / CHARS_PER_TOKEN);
+
+  const outputTokens =
+    pickInteger(body.max_tokens) ??
+    pickInteger(body.max_completion_tokens) ??
+    DEFAULT_MAX_OUTPUT_TOKENS;
+
+  return { model: modelId, inputTokens, outputTokens };
+}
+
+/**
+ * Compute the worst-case cents the request *could* debit, before the
+ * upstream call. Used for the pre-flight balance gate.
+ *
+ * @param body          Parsed request body
+ * @param modelId       Resolved model id
+ * @param planMarkup    Plan-specific markup (optional — falls back to
+ *                      the global USAGE_MARGIN_RATE when omitted).
+ */
+export function estimateChatRequestMaxCostCents(
+  body: Record<string, unknown>,
+  modelId: string,
+  planMarkup?: number,
+): number {
+  const usage = estimateChatWorstCaseUsage(body, modelId);
+  const usdCostRaw = calculateTokenCost(usage.model, usage.inputTokens, usage.outputTokens);
+  const { usdCharged } = calculateUsdWithMargin(usdCostRaw, planMarkup);
+  return Math.max(MIN_BALANCE_FLOOR_CENTS, Math.ceil(usdCharged * 100));
+}
+
+/**
+ * Conservative flat minimum for routes whose body shape is too varied to
+ * estimate (image gen, TTS, video). 10 cents is enough for one image at
+ * the cheapest tier (DALL-E 2 256×256 = $0.016) but still gates out
+ * already-empty wallets.
+ */
+export const FLAT_MIN_BALANCE_CENTS = 10;
+
+/**
+ * Shared probe used by every catch-all proxy (openai, anthropic, groq,
+ * deepseek, openrouter, together, xai). Reads the request body once,
+ * tries to detect a chat-completion shape, and returns:
+ *
+ *   - rebuiltBody:    bytes to forward upstream (with `stream_options`
+ *                     injected when applicable)
+ *   - minBalanceCents: server-side worst-case cost estimate (or the flat
+ *                     floor when the body shape is unknown)
+ *   - fallbackUsage:  the worst-case `UsageInfo` to bill if the upstream
+ *                     stream finishes without an authoritative usage
+ *                     event (chat-style endpoints only)
+ *
+ * Returns `null` for HEAD/GET requests with no body.
+ */
+export interface ProbedProxyRequest {
+  rebuiltBody: Uint8Array | undefined;
+  minBalanceCents: number;
+  fallbackUsage?: UsageInfo;
+  /** True when we recognised a chat-completion-shaped JSON body. */
+  isChatStyle: boolean;
+  /** Parsed body, exposed so callers can extract `model` etc. without re-parsing. */
+  bodyJson: Record<string, unknown> | null;
+}
+
+export async function probeProxyRequestBody(
+  rawRequest: Request,
+  endpoint: string,
+  planMarkup?: number,
+): Promise<ProbedProxyRequest> {
+  if (rawRequest.method === 'GET' || rawRequest.method === 'HEAD') {
+    return {
+      rebuiltBody: undefined,
+      minBalanceCents: FLAT_MIN_BALANCE_CENTS,
+      isChatStyle: false,
+      bodyJson: null,
+    };
+  }
+
+  const buffered = new Uint8Array(await rawRequest.arrayBuffer());
+
+  let bodyJson: Record<string, unknown> | null = null;
+  try {
+    bodyJson = JSON.parse(new TextDecoder().decode(buffered)) as Record<string, unknown>;
+  } catch {
+    // Non-JSON body (multipart, raw audio, etc.) — fall through with flat min.
+  }
+
+  const isChatLikeEndpoint =
+    endpoint.includes('chat/completions') ||
+    endpoint.includes('messages') ||
+    endpoint.includes('/responses');
+
+  const hasChatShape =
+    !!bodyJson &&
+    typeof bodyJson.model === 'string' &&
+    (Array.isArray(bodyJson.messages) || Array.isArray((bodyJson as Record<string, unknown>).input));
+
+  if (bodyJson && isChatLikeEndpoint && hasChatShape) {
+    const modelId = bodyJson.model as string;
+
+    // Inject stream_options.include_usage for OpenAI-compatible streams so
+    // the upstream actually emits a usage event we can parse.
+    if (
+      bodyJson.stream === true &&
+      (endpoint.includes('chat/completions') || endpoint.includes('/responses'))
+    ) {
+      bodyJson.stream_options = {
+        ...(bodyJson.stream_options as Record<string, unknown> | undefined ?? {}),
+        include_usage: true,
+      };
+    }
+
+    const rebuiltBody = new TextEncoder().encode(JSON.stringify(bodyJson));
+    const fallbackUsage = estimateChatWorstCaseUsage(bodyJson, modelId);
+    const minBalanceCents = estimateChatRequestMaxCostCents(bodyJson, modelId, planMarkup);
+
+    return {
+      rebuiltBody,
+      minBalanceCents,
+      fallbackUsage,
+      isChatStyle: true,
+      bodyJson,
+    };
+  }
+
+  return {
+    rebuiltBody: buffered.byteLength > 0 ? buffered : undefined,
+    minBalanceCents: FLAT_MIN_BALANCE_CENTS,
+    isChatStyle: false,
+    bodyJson,
+  };
+}
+
+// ============================================
 // RESPONSE PARSING UTILITIES
 // ============================================
 
@@ -294,6 +511,23 @@ export class UsageProcessingTransformStream extends TransformStream<Uint8Array, 
     resource: string;
     calculateCost: (usage: UsageInfo) => number;
     onComplete?: (result: UsageProcessingResult) => void;
+    /**
+     * Worst-case usage to bill if the upstream stream finishes (or the
+     * client disconnects) without an authoritative `usage` event.
+     *
+     * When set, parse failures fall back to billing this estimate rather
+     * than letting the request go fully unmetered. Strongly recommended
+     * for any chat-completion route — without it, a client that aborts
+     * mid-stream pays nothing while we owe the upstream provider for
+     * every token that was generated.
+     */
+    fallbackUsage?: UsageInfo;
+    /**
+     * Stable identifier used as part of the idempotency key when the
+     * fallback bill fires, so retries (e.g. abort + flush in fast
+     * succession) don't double-debit.
+     */
+    fallbackRequestId?: string;
   }) {
     const MAX_TAIL_BYTES = 8192;
     const tailChunks: Uint8Array[] = [];
@@ -311,12 +545,30 @@ export class UsageProcessingTransformStream extends TransformStream<Uint8Array, 
         }
         text += decoder.decode(new Uint8Array(0));
 
-        const usage = parseSSEForUsage(text);
+        let usage = parseSSEForUsage(text);
+        let usedFallback = false;
+
         if (!usage) {
-          if (tailBytes > 0) {
-            console.warn(`[ai-proxy] Unmetered streaming response (${tailBytes} bytes streamed, usage not parseable) — provider=${args.provider} org=${args.orgBillingId}`);
+          // Stream ended with no parseable usage event. Bill the
+          // worst-case estimate if we have one — otherwise the request
+          // would go entirely unmetered (active money leak).
+          if (args.fallbackUsage) {
+            usage = args.fallbackUsage;
+            usedFallback = true;
+            console.warn(
+              `[ai-proxy] Streaming usage missing — billing worst-case fallback ` +
+              `(provider=${args.provider} org=${args.orgBillingId} model=${usage.model} ` +
+              `bytes=${tailBytes} input=${usage.inputTokens} output=${usage.outputTokens})`,
+            );
+          } else {
+            if (tailBytes > 0) {
+              console.warn(
+                `[ai-proxy] Unmetered streaming response (${tailBytes} bytes streamed, ` +
+                `usage not parseable, no fallback) — provider=${args.provider} org=${args.orgBillingId}`,
+              );
+            }
+            return;
           }
-          return;
         }
 
         const usdCostRaw = args.calculateCost(usage);
@@ -329,6 +581,10 @@ export class UsageProcessingTransformStream extends TransformStream<Uint8Array, 
           resource: args.resource,
           model: usage.model,
           usdCostRaw,
+          requestId: args.fallbackRequestId,
+          metadata: usedFallback
+            ? { unmeteredFallback: true, fallbackReason: 'sse_parse_failure' }
+            : undefined,
         });
 
         args.onComplete?.(result);

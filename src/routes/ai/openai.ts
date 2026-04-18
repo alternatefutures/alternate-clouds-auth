@@ -5,11 +5,13 @@
 
 import { Hono } from 'hono';
 import { requireAuthUser } from '../../middleware/auth';
+import { nanoid } from 'nanoid';
 import {
   calculateTokenCost,
   checkBalance,
   getOrgBillingFromRequest,
   parseOpenAIUsage,
+  probeProxyRequestBody,
   processUsage,
   UsageProcessingTransformStream,
 } from './_lib/costMetering';
@@ -67,52 +69,37 @@ app.all('/*', async (c) => {
     return c.json({ error: 'Organization ID required (X-Organization-Id header)' }, 400);
   }
 
-  // Check for minimum balance requirement (in cents)
-  const minBalanceHeader = c.req.header('X-Min-Balance-Cents');
-  const minBalanceCents = minBalanceHeader ? parseInt(minBalanceHeader, 10) : 1;
-
-  // Check balance before proxying
-  const balanceCheck = await checkBalance(billing.orgBillingId, minBalanceCents);
-  if (!balanceCheck.hasBalance) {
-    return c.json({
-      error: 'Insufficient balance',
-      balance_cents: balanceCheck.balanceCents,
-      balance_usd: (balanceCheck.balanceCents / 100).toFixed(2),
-    }, 402);
-  }
-
-  // Get the path after /ai/openai/
   const path = c.req.path.replace(/^\/ai\/openai\/?/, '');
   const proxyUrl = `${OPENAI_BASE_URL}/${path}`;
   const endpoint = path.split('?')[0];
 
-  // Build headers - filter out host and x-* headers
+  // Server-side worst-case cost gate (replaces caller-controlled
+  // X-Min-Balance-Cents header). The probe also injects
+  // stream_options.include_usage for chat/completions and Responses API
+  // streams so usage events are emitted.
+  const probe = await probeProxyRequestBody(c.req.raw.clone(), endpoint);
+
+  const balanceCheck = await checkBalance(billing.orgBillingId, probe.minBalanceCents);
+  if (!balanceCheck.hasBalance) {
+    return c.json({
+      error: 'Insufficient balance for worst-case cost of this request',
+      balance_cents: balanceCheck.balanceCents,
+      balance_usd: (balanceCheck.balanceCents / 100).toFixed(2),
+      required_cents: probe.minBalanceCents,
+      required_usd: (probe.minBalanceCents / 100).toFixed(2),
+    }, 402);
+  }
+
   const headers: Record<string, string> = {
     'Authorization': `Bearer ${OPENAI_API_KEY}`,
     'Content-Type': 'application/json',
   };
-  
-  // Get request body
-  let requestBody: string | undefined;
-  if (c.req.method !== 'GET' && c.req.method !== 'HEAD') {
-    try {
-      const body = await c.req.json();
-      // Inject stream_options.include_usage for streaming requests
-      if ((endpoint.includes('chat/completions') || endpoint.includes('responses')) && body.stream === true) {
-        body.stream_options = { ...body.stream_options, include_usage: true };
-      }
-      requestBody = JSON.stringify(body);
-    } catch {
-      // If body parsing fails, try to get raw text
-      requestBody = await c.req.text();
-    }
-  }
+  if (probe.rebuiltBody) headers['Content-Length'] = String(probe.rebuiltBody.byteLength);
 
-  // Make upstream request
   const upstreamResponse = await fetch(proxyUrl, {
     method: c.req.method,
     headers,
-    body: requestBody,
+    body: probe.rebuiltBody,
   });
 
   // Handle non-OK responses
@@ -131,7 +118,7 @@ app.all('/*', async (c) => {
   const isStreaming = contentType.includes('text/event-stream');
 
   if (isStreaming && upstreamResponse.body) {
-    // Handle streaming response
+    const fallbackRequestId = `stream:${nanoid()}`;
     const transformStream = new UsageProcessingTransformStream({
       orgBillingId: billing.orgBillingId,
       userId: billing.userId,
@@ -139,6 +126,8 @@ app.all('/*', async (c) => {
       provider: 'openai',
       resource: endpoint,
       calculateCost: (usage) => calculateChatCompletionsCost(usage.model, usage.inputTokens, usage.outputTokens),
+      fallbackUsage: probe.fallbackUsage,
+      fallbackRequestId,
     });
 
     c.req.raw.signal.addEventListener('abort', () => {
@@ -175,11 +164,13 @@ app.all('/*', async (c) => {
       usdCostRaw = calculateChatCompletionsCost(usage.model, usage.inputTokens, usage.outputTokens);
     }
   } else if (endpoint.includes('images/generations')) {
-    const reqBody = await c.req.json().catch(() => ({}));
-    model = reqBody.model || 'dall-e-3';
-    const imageCount = reqBody.n || 1;
-    const size = reqBody.size || '1024x1024';
-    const quality = reqBody.quality || 'standard';
+    // probe.bodyJson is the already-parsed request body (we consumed
+    // c.req.raw via probeProxyRequestBody), so we can't re-call c.req.json().
+    const reqBody = (probe.bodyJson ?? {}) as Record<string, unknown>;
+    model = (reqBody.model as string | undefined) || 'dall-e-3';
+    const imageCount = (reqBody.n as number | undefined) || 1;
+    const size = (reqBody.size as string | undefined) || '1024x1024';
+    const quality = (reqBody.quality as string | undefined) || 'standard';
     usdCostRaw = calculateImageCost(model, imageCount, size, quality);
   } else if (endpoint.includes('embeddings')) {
     const usage = responseBody.usage as { total_tokens?: number } | undefined;
@@ -190,9 +181,9 @@ app.all('/*', async (c) => {
     model = 'whisper-1';
     usdCostRaw = 0.006;
   } else if (endpoint.includes('audio/speech')) {
-    const reqBody = await c.req.json().catch(() => ({}));
-    model = reqBody.model || 'tts-1';
-    const inputLength = (reqBody.input || '').length;
+    const reqBody = (probe.bodyJson ?? {}) as Record<string, unknown>;
+    model = (reqBody.model as string | undefined) || 'tts-1';
+    const inputLength = ((reqBody.input as string | undefined) || '').length;
     usdCostRaw = inputLength * (model === 'tts-1-hd' ? 0.00003 : 0.000015);
   }
 

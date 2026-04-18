@@ -7,6 +7,7 @@ import { Hono } from 'hono';
 import { requireAuthUser } from '../../middleware/auth';
 import {
   checkBalance,
+  FLAT_MIN_BALANCE_CENTS,
   getOrgBillingFromRequest,
   processUsage,
 } from './_lib/costMetering';
@@ -84,15 +85,18 @@ async function handleFalRequest(c: any, modelId: string): Promise<Response> {
     return c.json({ error: 'Organization ID required (X-Organization-Id header)' }, 400);
   }
 
-  const minBalanceHeader = c.req.header('X-Min-Balance-Cents');
-  const minBalanceCents = minBalanceHeader ? parseInt(minBalanceHeader, 10) : 1;
-
-  const balanceCheck = await checkBalance(billing.orgBillingId, minBalanceCents);
+  // Server-side worst-case floor (replaces caller-controlled
+  // X-Min-Balance-Cents header). Fal.ai is per-image / per-megapixel /
+  // per-second pricing — the conservative flat floor is sufficient
+  // for gating without buffering arbitrary multipart bodies.
+  const balanceCheck = await checkBalance(billing.orgBillingId, FLAT_MIN_BALANCE_CENTS);
   if (!balanceCheck.hasBalance) {
     return c.json({
-      error: 'Insufficient balance',
+      error: 'Insufficient balance for worst-case cost of this request',
       balance_cents: balanceCheck.balanceCents,
       balance_usd: (balanceCheck.balanceCents / 100).toFixed(2),
+      required_cents: FLAT_MIN_BALANCE_CENTS,
+      required_usd: (FLAT_MIN_BALANCE_CENTS / 100).toFixed(2),
     }, 402);
   }
 
