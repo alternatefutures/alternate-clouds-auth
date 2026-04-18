@@ -26,6 +26,7 @@ import adminUsersRoutes from './routes/admin/users';
 import testRoutes from './routes/internal/test';
 import internalAuditRoutes from './routes/internal/audit';
 import { startTrialScheduler, stopTrialScheduler } from './services/trialScheduler';
+import { getAuditWriteStats } from './lib/audit';
 
 // Initialize secrets before anything else
 await secretsService.initialize();
@@ -70,6 +71,15 @@ app.get('/health', (c) => {
     version: '0.1.0',
     timestamp: new Date().toISOString(),
   });
+});
+
+// Audit-write counter exposed for an external silent-failure alert.
+// Compares cloud-api's `/internal/audit/health` to this one — any
+// service reporting attempted=0 for >30min during business hours
+// (or succeeded < attempted) trips the alarm.
+app.get('/internal/audit/health', (c) => {
+  const stats = getAuditWriteStats();
+  return c.json({ source: 'auth', ...stats });
 });
 
 // Database health check — verifies DB connectivity, schema integrity, and seed data

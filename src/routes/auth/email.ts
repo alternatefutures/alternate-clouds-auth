@@ -50,6 +50,14 @@ app.post('/request', strictRateLimit, async (c) => {
     // Send email with verification code
     await emailService.sendVerificationCode(email, code);
 
+    // Beta-grade observability: every OTP issuance produces a row so a
+    // suspicious "100 OTPs to one email in 60s" pattern is queryable
+    // post-hoc, not just visible in cron-billing rows.
+    await auditLogService.logFromContext(c, {
+      eventType: 'OTP_ISSUED',
+      metadata: { method: 'email', identifier: email },
+    });
+
     return c.json({
       success: true,
       message: 'Verification code sent to your email',
@@ -57,6 +65,15 @@ app.post('/request', strictRateLimit, async (c) => {
     });
   } catch (error) {
     console.error('Email request error:', error);
+
+    await auditLogService.logFromContext(c, {
+      eventType: 'OTP_ISSUED',
+      metadata: {
+        method: 'email',
+        status: 'error',
+        errorMessage: error instanceof Error ? error.message : String(error),
+      },
+    });
 
     if (error instanceof z.ZodError) {
       return c.json({ error: 'Invalid email address' }, 400);

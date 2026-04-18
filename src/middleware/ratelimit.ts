@@ -233,6 +233,25 @@ export function rateLimit(config: RateLimitConfig) {
       const retryAfter = Math.ceil((result.resetAt - Date.now()) / 1000);
       c.header('Retry-After', retryAfter.toString());
 
+      // Audit every block. Done as a dynamic import so this middleware
+      // file stays standalone for unit tests (which don't boot the full
+      // service container that auditLogService implicitly relies on).
+      // No await on the audit promise — must not delay the 429.
+      import('../services/auditLog.service')
+        .then(({ auditLogService }) =>
+          auditLogService.logFromContext(c, {
+            eventType: 'RATE_LIMIT_EXCEEDED',
+            metadata: {
+              path: c.req.path,
+              method: c.req.method,
+              count: result.count,
+              effectiveMax,
+              progressivePenalties,
+            },
+          })
+        )
+        .catch(() => {/* never block a 429 on audit failure */});
+
       return c.json(
         {
           error: 'Rate limit exceeded',

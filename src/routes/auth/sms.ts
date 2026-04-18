@@ -46,6 +46,11 @@ app.post('/request', strictRateLimit, async (c) => {
     // Send SMS with verification code
     await smsService.sendVerificationCode(phone, code);
 
+    await auditLogService.logFromContext(c, {
+      eventType: 'OTP_ISSUED',
+      metadata: { method: 'sms', identifier: phone },
+    });
+
     return c.json({
       success: true,
       message: 'Verification code sent to your phone',
@@ -53,6 +58,15 @@ app.post('/request', strictRateLimit, async (c) => {
     });
   } catch (error) {
     console.error('SMS request error:', error);
+
+    await auditLogService.logFromContext(c, {
+      eventType: 'OTP_ISSUED',
+      metadata: {
+        method: 'sms',
+        status: 'error',
+        errorMessage: error instanceof Error ? error.message : String(error),
+      },
+    });
 
     if (error instanceof z.ZodError) {
       return c.json({ error: 'Invalid phone number' }, 400);

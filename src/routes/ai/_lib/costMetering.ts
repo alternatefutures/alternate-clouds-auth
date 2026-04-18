@@ -7,6 +7,7 @@
 import { Context } from 'hono';
 import { nanoid } from 'nanoid';
 import { dbService, USAGE_MARGIN_RATE } from '../../../services/db.service';
+import { audit } from '../../../lib/audit';
 import {
   INPUT_COST_PER_TOKEN,
   OUTPUT_COST_PER_TOKEN,
@@ -478,6 +479,33 @@ export async function processUsage(args: {
     usdCharged,
     requestId,
     metadata,
+  });
+
+  // Beta-grade observability for AI proxy traffic. Every settled
+  // request (success or worst-case fallback) lands in audit_events so
+  // we can answer "how many tokens did user X burn between hh:mm and
+  // hh:mm" / "did the streaming fallback fire?" with one SQL query.
+  // This complements (not replaces) the per-row usage table — the
+  // audit row carries traceId for cross-service correlation.
+  audit(dbService.prismaClient, {
+    category: 'ai-proxy',
+    action: `ai.${provider}.${serviceType}`,
+    status: 'ok',
+    userId,
+    payload: {
+      provider,
+      model,
+      resource,
+      usdCostRaw,
+      usdCharged,
+      marginRate,
+      amountCents,
+      newBalanceCents: debitResult.balanceCents,
+      requestId,
+      // Pass through any caller-specified flags (e.g. fallback markers
+      // from UsageProcessingTransformStream's parse-failure branch).
+      ...metadata,
+    },
   });
 
   return {

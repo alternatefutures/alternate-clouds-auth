@@ -8,6 +8,7 @@ import { TokenService } from '../../services/token.service';
 import { authMiddleware, requireAuthUser } from '../../middleware/auth';
 import { standardRateLimit } from '../../middleware/ratelimit';
 import { encryptForStorage, decryptFromStorage, verifyTokenHash, timingSafeCompare } from '../../utils/crypto';
+import { auditLogService } from '../../services/auditLog.service';
 
 const app = new Hono();
 const tokenService = new TokenService(dbService);
@@ -55,6 +56,11 @@ app.post('/cli/start', standardRateLimit, async (c) => {
     max_attempts: 50,
     verified: 0,
     ip_address: c.req.header('x-forwarded-for') || c.req.header('x-real-ip'),
+  });
+
+  await auditLogService.logFromContext(c, {
+    eventType: 'CLI_PAIR_START',
+    metadata: { verificationSessionId, name: name || 'CLI Login' },
   });
 
   return c.json({
@@ -144,6 +150,29 @@ app.post('/cli/approve', standardRateLimit, authMiddleware, async (c) => {
       approvedAt: Date.now(),
     })
   );
+
+  await auditLogService.logFromContext(c, {
+    userId: authUser.userId,
+    eventType: 'CLI_PAIR_SUCCESS',
+    metadata: {
+      verificationSessionId,
+      organizationId: organizationId ?? null,
+      tokenName: name || payload.name || 'CLI Login',
+    },
+  });
+  // PAT was just minted via tokenService.createToken — emit the
+  // PAT_CREATED event so admin can correlate the CLI flow with the
+  // exact token id that landed in the user's keychain.
+  await auditLogService.logFromContext(c, {
+    userId: authUser.userId,
+    eventType: 'PAT_CREATED',
+    metadata: {
+      source: 'cli',
+      tokenId: created.id,
+      organizationId: organizationId ?? null,
+      expiresAt: finalExpiresAt,
+    },
+  });
 
   return c.json({ success: true });
 });
