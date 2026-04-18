@@ -9,6 +9,34 @@ import { PrismaClient } from '@prisma/client';
 import { createHash, timingSafeEqual } from 'node:crypto';
 
 /**
+ * Default amount of compute credit (in USD cents) seeded into a new
+ * org's wallet on signup. Overridable via the `SIGNUP_CREDIT_CENTS`
+ * env var so we can change the value with a K8s secret bump rather
+ * than a code release. Surfaced through `/admin/users.config` so the
+ * admin dashboard never drifts from this value.
+ *
+ * Single source of truth — anything else that needs to know "what's
+ * the signup credit?" must call `getSignupCreditCents()`.
+ */
+const DEFAULT_SIGNUP_CREDIT_CENTS = 500;
+
+export function getSignupCreditCents(): number {
+  const raw = process.env.SIGNUP_CREDIT_CENTS;
+  if (!raw) return DEFAULT_SIGNUP_CREDIT_CENTS;
+  const parsed = Number.parseInt(raw, 10);
+  // Reject NaN, negatives, and absurdly large values (>$10k) to avoid
+  // a typo in the env var silently issuing $5,000 credits to every new
+  // signup. Falls back to the default and logs once.
+  if (!Number.isFinite(parsed) || parsed < 0 || parsed > 1_000_000) {
+    console.warn(
+      `[db.service] Invalid SIGNUP_CREDIT_CENTS="${raw}" — falling back to ${DEFAULT_SIGNUP_CREDIT_CENTS}`,
+    );
+    return DEFAULT_SIGNUP_CREDIT_CENTS;
+  }
+  return parsed;
+}
+
+/**
  * Hash a token/secret using SHA-256 for storage at rest
  */
 function hashTokenForStorage(token: string): string {
@@ -1580,22 +1608,31 @@ export class DatabaseService {
       timeout: 30000, // 30s (default is 5s, too tight for cross-datacenter Akash deploys)
     });
 
-    // 6. Seed $5.00 signup compute credit into the org's usage wallet
-    try {
-      await this.creditOrgBalanceIdempotent({
-        orgBillingId: billingId,
-        actorUserId: userId,
-        amountCents: 500, // $5.00
-        reason: 'signup_credit',
-        idempotencyKey: `signup_credit:${billingId}`,
-        metadata: {
-          description: 'Signup compute credit',
-          orgId,
-        },
-      });
-    } catch (error) {
-      // Non-fatal: org creation succeeds even if credit seeding fails
-      console.warn(`[createDefaultOrganizationForUser] Failed to seed signup credit for org ${orgId}:`, error);
+    // 6. Seed signup compute credit into the org's usage wallet.
+    // Amount is centralized in `getSignupCreditCents()` so the admin
+    // dashboard, the .env.example, and this seed call never drift.
+    const signupCreditCents = getSignupCreditCents();
+    if (signupCreditCents > 0) {
+      try {
+        await this.creditOrgBalanceIdempotent({
+          orgBillingId: billingId,
+          actorUserId: userId,
+          amountCents: signupCreditCents,
+          reason: 'signup_credit',
+          idempotencyKey: `signup_credit:${billingId}`,
+          metadata: {
+            description: 'Signup compute credit',
+            orgId,
+            // Stamp the granted amount in the metadata so we have an
+            // immutable per-org record of what each user actually got
+            // — survives future SIGNUP_CREDIT_CENTS changes.
+            grantedCents: signupCreditCents,
+          },
+        });
+      } catch (error) {
+        // Non-fatal: org creation succeeds even if credit seeding fails
+        console.warn(`[createDefaultOrganizationForUser] Failed to seed signup credit for org ${orgId}:`, error);
+      }
     }
 
     return {
