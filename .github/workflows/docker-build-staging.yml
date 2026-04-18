@@ -90,7 +90,7 @@ jobs:
       - name: Install trivy
         if: ${{ env.SUPPLY_CHAIN_DISABLED != 'true' }}
         env:
-          TRIVY_VERSION: "0.56.2"
+          TRIVY_VERSION: "0.70.0"
         run: |
           set -euo pipefail
           curl -fsSL -o /tmp/trivy.tar.gz \
