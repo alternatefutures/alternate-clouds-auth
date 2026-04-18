@@ -1,6 +1,8 @@
 import { Hono } from 'hono';
 import { PrismaClient } from '@prisma/client';
 
+import { getSignupCreditCents } from '../../services/db.service';
+
 const app = new Hono();
 const prisma = new PrismaClient();
 
@@ -76,7 +78,17 @@ app.get('/', async (c) => {
     };
   });
 
-  return c.json({ users: result, count: result.length });
+  // `config` echoes the canonical billing knobs from this service so
+  // the admin dashboard can compute things like "free credits issued"
+  // (= users.length × signupCreditCents) without hardcoding a value
+  // that might drift from `SIGNUP_CREDIT_CENTS` in our K8s secrets.
+  return c.json({
+    users: result,
+    count: result.length,
+    config: {
+      signupCreditCents: getSignupCreditCents(),
+    },
+  });
 });
 
 export default app;
