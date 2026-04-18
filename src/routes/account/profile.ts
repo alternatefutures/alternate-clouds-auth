@@ -3,6 +3,8 @@ import { z } from 'zod';
 import { dbService } from '../../services/db.service';
 import { authMiddleware, requireAuthUser } from '../../middleware/auth';
 import { standardRateLimit } from '../../middleware/ratelimit';
+import { auditLogService } from '../../services/auditLog.service';
+import { audit } from '../../lib/audit';
 
 const app = new Hono();
 
@@ -78,6 +80,14 @@ app.patch('/', standardRateLimit, async (c) => {
 
     if (Object.keys(updateFields).length > 0) {
       await dbService.updateUser(authUser.userId, updateFields);
+
+      await auditLogService.logFromContext(c, {
+        userId: authUser.userId,
+        eventType: 'PROFILE_UPDATE',
+        metadata: {
+          changedFields: Object.keys(updateFields),
+        },
+      });
     }
 
     // Get updated user
@@ -120,6 +130,23 @@ app.patch('/', standardRateLimit, async (c) => {
 app.delete('/', standardRateLimit, async (c) => {
   try {
     const authUser = requireAuthUser(c);
+
+    // Account deletion is a high-signal event for fraud / abuse
+    // detection. Emit BEFORE the cascade delete because the user row
+    // is gone afterwards (FK on audit_events nulls user_id but the
+    // row itself stays). Audit goes through audit() directly because
+    // the legacy auditLogService doesn't have a "USER_DELETED" type
+    // and adding one purely for this single call site would be noise.
+    audit(dbService.prismaClient, {
+      category: 'user',
+      action: 'user.account.deleted',
+      status: 'ok',
+      userId: authUser.userId,
+      payload: {
+        ipAddress: c.req.header('x-forwarded-for') || c.req.header('x-real-ip'),
+        userAgent: c.req.header('user-agent'),
+      },
+    });
 
     // Delete user (cascade will delete auth methods and sessions)
     await dbService.deleteUser(authUser.userId);

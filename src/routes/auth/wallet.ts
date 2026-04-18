@@ -64,6 +64,11 @@ app.post('/challenge', strictRateLimit, async (c) => {
       ip_address: c.req.header('x-forwarded-for') || c.req.header('x-real-ip'),
     });
 
+    await auditLogService.logFromContext(c, {
+      eventType: 'WALLET_NONCE_ISSUED',
+      metadata: { address: address.toLowerCase(), chainId: chainId || 1 },
+    });
+
     return c.json({
       success: true,
       message,
@@ -72,6 +77,14 @@ app.post('/challenge', strictRateLimit, async (c) => {
     });
   } catch (error) {
     console.error('Wallet challenge error:', error);
+
+    await auditLogService.logFromContext(c, {
+      eventType: 'WALLET_LINK_FAILURE',
+      metadata: {
+        phase: 'challenge',
+        errorMessage: error instanceof Error ? error.message : String(error),
+      },
+    });
 
     if (error instanceof Error && error.message.includes('validation')) {
       return c.json({ error: 'Invalid wallet address' }, 400);
@@ -258,6 +271,14 @@ app.post('/verify', strictRateLimit, async (c) => {
     });
   } catch (error) {
     console.error('Wallet verify error:', error);
+
+    await auditLogService.logFromContext(c, {
+      eventType: 'WALLET_LINK_FAILURE',
+      metadata: {
+        phase: 'verify',
+        errorMessage: error instanceof Error ? error.message : String(error),
+      },
+    });
 
     if (error instanceof Error && error.message.includes('validation')) {
       return c.json({ error: 'Invalid request data' }, 400);

@@ -116,10 +116,23 @@ app.get('/:provider', standardRateLimit, async (c) => {
       return c.json({ error: 'Failed to generate authorization URL' }, 500);
     }
 
+    await auditLogService.logFromContext(c, {
+      eventType: 'OAUTH_START',
+      metadata: { provider, hasCustomRedirect: Boolean(redirectUrl) },
+    });
+
     // Redirect to OAuth provider
     return c.redirect(authUrl);
   } catch (error) {
     console.error('OAuth initiate error:', error);
+    await auditLogService.logFromContext(c, {
+      eventType: 'OAUTH_FAILURE',
+      metadata: {
+        provider: c.req.param('provider'),
+        phase: 'initiate',
+        errorMessage: error instanceof Error ? error.message : String(error),
+      },
+    });
     return c.json({ error: 'Failed to initiate OAuth flow' }, 500);
   }
 });
@@ -331,6 +344,14 @@ app.get('/callback/:provider', async (c) => {
     return c.redirect(redirect.toString());
   } catch (error) {
     console.error('OAuth callback error:', error);
+    await auditLogService.logFromContext(c, {
+      eventType: 'OAUTH_FAILURE',
+      metadata: {
+        provider: c.req.param('provider'),
+        phase: 'callback',
+        errorMessage: error instanceof Error ? error.message : String(error),
+      },
+    });
     return c.json({ error: 'OAuth authentication failed' }, 500);
   }
 });

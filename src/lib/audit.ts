@@ -54,7 +54,55 @@ export interface AuditEventInput {
 
 const DEFAULT_SOURCE = 'auth'
 
+// Rolling 5-min counters exposed via getAuditWriteStats() for /health.
+// A silent-failure alert can compare `attempted` vs `succeeded`: any
+// gap means the audit lib is dropping rows on the floor and we want
+// to know about it before the admin UI shows a suspicious zero.
+interface BucketCounters {
+  attempted: number
+  succeeded: number
+  failed: number
+  rejected: number
+}
+const BUCKET_MS = 60_000
+const BUCKETS = 5
+const buckets: BucketCounters[] = Array.from({ length: BUCKETS }, () => ({
+  attempted: 0,
+  succeeded: 0,
+  failed: 0,
+  rejected: 0,
+}))
+
+function bucketIndex(): number {
+  return Math.floor(Date.now() / BUCKET_MS) % BUCKETS
+}
+
+function bumpCounter(field: keyof BucketCounters): void {
+  buckets[bucketIndex()][field] += 1
+}
+
+export function getAuditWriteStats(): {
+  windowMs: number
+  attempted: number
+  succeeded: number
+  failed: number
+  rejected: number
+} {
+  const totals = buckets.reduce(
+    (acc, b) => {
+      acc.attempted += b.attempted
+      acc.succeeded += b.succeeded
+      acc.failed += b.failed
+      acc.rejected += b.rejected
+      return acc
+    },
+    { attempted: 0, succeeded: 0, failed: 0, rejected: 0 }
+  )
+  return { windowMs: BUCKET_MS * BUCKETS, ...totals }
+}
+
 export function audit(prisma: PrismaClient, evt: AuditEventInput): void {
+  bumpCounter('attempted')
   try {
     const payload = sanitize(evt.payload ?? {}) as Prisma.InputJsonValue
     const data: Prisma.AuditEventUncheckedCreateInput = {
@@ -77,11 +125,28 @@ export function audit(prisma: PrismaClient, evt: AuditEventInput): void {
     }
     prisma.auditEvent
       .create({ data })
-      .catch((err) =>
-        console.error('[audit] write failed', { action: evt.action, err })
-      )
+      .then(() => bumpCounter('succeeded'))
+      .catch((err) => {
+        bumpCounter('failed')
+        // Use console.error (no central logger in service-auth yet) but
+        // include traceId so the failure can be correlated with the
+        // request that produced it. errorCode/message specifically called
+        // out so they're not swallowed by lazy log formatters.
+        console.error('[audit] write failed', {
+          traceId: data.traceId,
+          action: evt.action,
+          category: evt.category,
+          errorCode: (err as { code?: string })?.code,
+          errorMessage: (err as { message?: string })?.message,
+        })
+      })
   } catch (err) {
-    console.error('[audit] write rejected', { action: evt.action, err })
+    bumpCounter('rejected')
+    console.error('[audit] write rejected', {
+      action: evt.action,
+      category: evt.category,
+      err: (err as { message?: string })?.message ?? String(err),
+    })
   }
 }
 

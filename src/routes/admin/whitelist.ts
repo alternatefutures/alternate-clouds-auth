@@ -1,6 +1,7 @@
 import { Hono } from 'hono';
 import { z } from 'zod';
 import { whitelistService } from '../../services/whitelist.service';
+import { auditLogService } from '../../services/auditLog.service';
 
 const app = new Hono();
 
@@ -42,6 +43,16 @@ app.post('/', async (c) => {
   const body = await c.req.json();
   const { identifier, identifierType, note } = addSchema.parse(body);
   const entry = await whitelistService.add(identifier, identifierType, note);
+  await auditLogService.logFromContext(c, {
+    eventType: 'WHITELIST_MUTATE',
+    metadata: {
+      action: 'add',
+      identifier,
+      identifierType,
+      note,
+      entryId: entry.id,
+    },
+  });
   return c.json({ success: true, entry }, 201);
 });
 
@@ -50,6 +61,10 @@ app.delete('/:id', async (c) => {
   const id = c.req.param('id');
   try {
     await whitelistService.remove(id);
+    await auditLogService.logFromContext(c, {
+      eventType: 'WHITELIST_MUTATE',
+      metadata: { action: 'remove', entryId: id },
+    });
     return c.json({ success: true });
   } catch {
     return c.json({ error: 'Entry not found' }, 404);

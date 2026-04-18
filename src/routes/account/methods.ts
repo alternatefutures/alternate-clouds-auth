@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import { dbService } from '../../services/db.service';
 import { authMiddleware, requireAuthUser } from '../../middleware/auth';
 import { standardRateLimit } from '../../middleware/ratelimit';
+import { auditLogService } from '../../services/auditLog.service';
 
 const app = new Hono();
 
@@ -64,6 +65,16 @@ app.delete('/:id', standardRateLimit, async (c) => {
 
     // Delete the auth method
     await dbService.deleteAuthMethod(methodId);
+
+    await auditLogService.logFromContext(c, {
+      userId: user.userId,
+      eventType: 'AUTH_METHOD_UNLINK',
+      metadata: {
+        methodId,
+        methodType: method.method_type,
+        provider: method.provider ?? null,
+      },
+    });
 
     return c.json({
       success: true,
