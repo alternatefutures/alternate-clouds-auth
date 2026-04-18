@@ -1,8 +1,11 @@
 import { Hono } from 'hono';
 import { requireAuthUser } from '../../middleware/auth';
+import { nanoid } from 'nanoid';
 import {
   calculateTokenCost,
   checkBalance,
+  estimateChatRequestMaxCostCents,
+  estimateChatWorstCaseUsage,
   getOrgBillingFromRequest,
   parseOpenAIUsage,
   parseAnthropicUsage,
@@ -52,18 +55,6 @@ app.post('/chat/completions', async (c) => {
     return c.json({ error: 'Organization ID required (X-Organization-Id header)' }, 400);
   }
 
-  const minBalanceHeader = c.req.header('X-Min-Balance-Cents');
-  const minBalanceCents = minBalanceHeader ? parseInt(minBalanceHeader, 10) : 1;
-
-  const balanceCheck = await checkBalance(billing.orgBillingId, minBalanceCents);
-  if (!balanceCheck.hasBalance) {
-    return c.json({
-      error: 'Insufficient balance',
-      balance_cents: balanceCheck.balanceCents,
-      balance_usd: (balanceCheck.balanceCents / 100).toFixed(2),
-    }, 402);
-  }
-
   let body: Record<string, unknown>;
   try {
     body = await c.req.json();
@@ -79,6 +70,25 @@ app.post('/chat/completions', async (c) => {
   const entry = resolveProvider(modelId);
   if (!entry) {
     return c.json({ error: `Unknown model: ${modelId}. Use GET /v1/models to list available models.` }, 400);
+  }
+
+  // Server-side worst-case cost gate.
+  //
+  // The legacy `X-Min-Balance-Cents` header was user-controlled — any caller
+  // could send `X-Min-Balance-Cents: 1` and slip past this gate even if the
+  // request was guaranteed to debit far more than the wallet held. We now
+  // estimate the maximum cents the request could possibly cost from the
+  // request body + model pricing and require *that* much in the wallet.
+  const minBalanceCents = estimateChatRequestMaxCostCents(body, modelId);
+  const balanceCheck = await checkBalance(billing.orgBillingId, minBalanceCents);
+  if (!balanceCheck.hasBalance) {
+    return c.json({
+      error: 'Insufficient balance for worst-case cost of this request',
+      balance_cents: balanceCheck.balanceCents,
+      balance_usd: (balanceCheck.balanceCents / 100).toFixed(2),
+      required_cents: minBalanceCents,
+      required_usd: (minBalanceCents / 100).toFixed(2),
+    }, 402);
   }
 
   const config = PROVIDER_CONFIG[entry.provider];
@@ -140,6 +150,11 @@ app.post('/chat/completions', async (c) => {
       responseStream = responseStream.pipeThrough(new AnthropicToOpenAIStream(modelId));
     }
 
+    // Stable per-request id keeps the worst-case fallback bill idempotent
+    // across abort + flush races.
+    const fallbackRequestId = `stream:${nanoid()}`;
+    const fallbackUsage = estimateChatWorstCaseUsage(body, modelId);
+
     const usageStream = new UsageProcessingTransformStream({
       orgBillingId: billing.orgBillingId,
       userId: billing.userId,
@@ -147,6 +162,8 @@ app.post('/chat/completions', async (c) => {
       provider: entry.provider,
       resource: 'chat/completions',
       calculateCost: (usage) => calculateTokenCost(usage.model, usage.inputTokens, usage.outputTokens),
+      fallbackUsage,
+      fallbackRequestId,
     });
 
     c.req.raw.signal.addEventListener('abort', () => {

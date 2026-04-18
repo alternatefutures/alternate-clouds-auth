@@ -51,14 +51,30 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Build and push Docker image
+        id: build
         uses: docker/build-push-action@v5
         with:
           context: .
           push: true
           no-cache: true
           platforms: linux/amd64
+          provenance: false
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+
+      - name: Resolve immutable image reference
+        if: github.ref == 'refs/heads/main'
+        id: image
+        run: |
+          DIGEST="${{ steps.build.outputs.digest }}"
+          if [ -z "${DIGEST}" ]; then
+            echo "::error::docker/build-push-action did not emit a digest"
+            exit 1
+          fi
+          IMAGE_REF="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${DIGEST}"
+          echo "ref=${IMAGE_REF}" >> $GITHUB_OUTPUT
+          echo "digest=${DIGEST}" >> $GITHUB_OUTPUT
+          echo "Pinned image: ${IMAGE_REF}"
 
       - name: Set up kubectl
         if: github.ref == 'refs/heads/main'
@@ -70,7 +86,7 @@ jobs:
       - name: Deploy to K3s
         if: github.ref == 'refs/heads/main'
         run: |
-          IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:main-${GITHUB_SHA::7}"
+          IMAGE="${{ steps.image.outputs.ref }}"
           echo "Deploying image: ${IMAGE}"
           kubectl set image deployment/service-auth \
             service-auth=${IMAGE} \
@@ -108,7 +124,7 @@ jobs:
           curl -sf -H "Content-Type: application/json" -d "{
             \"embeds\": [{
               \"title\": \"✅ service-auth deployed\",
-              \"description\": \"Commit: \`${GITHUB_SHA::7}\`\nHealth: ${{ steps.verify.outputs.healthy == 'true' && 'passing' || 'pending' }}\n[View run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})\",
+              \"description\": \"Commit: \`${GITHUB_SHA::7}\`\nDigest: \`${{ steps.image.outputs.digest }}\`\nHealth: ${{ steps.verify.outputs.healthy == 'true' && 'passing' || 'pending' }}\n[View run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})\",
               \"color\": 3066993,
               \"footer\": {\"text\": \"Alternate Clouds Deploy\"},
               \"timestamp\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"
