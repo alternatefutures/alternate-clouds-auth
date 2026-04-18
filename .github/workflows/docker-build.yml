@@ -41,10 +41,14 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          # IMPORTANT: :latest is intentionally NOT emitted here. We
+          # promote :latest only after Trivy + rollout + health check
+          # pass on main (see "Promote :latest tag" step below). That
+          # way a CRITICAL CVE or a failed migration cannot silently
+          # leak a bad image to anyone pulling :latest.
           tags: |
             type=ref,event=branch
             type=sha,prefix={{branch}}-
-            type=raw,value=latest,enable={{is_default_branch}}
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -213,6 +217,22 @@ jobs:
             echo "healthy=false" >> $GITHUB_OUTPUT
             exit 1
           fi
+
+      # ---------------------------------------------------------------
+      # Promote :latest only after a clean run on main: signed image,
+      # Trivy passed, rollout completed, /health returned 200. Any
+      # earlier failure leaves :latest pointing at the previous good
+      # image, so `imagePullPolicy:Always` + pod restart can't pull a
+      # broken build. Uses `buildx imagetools create` — manifest copy,
+      # no layer re-upload.
+      # ---------------------------------------------------------------
+      - name: Promote :latest tag (post-verify)
+        if: success() && github.ref == 'refs/heads/main'
+        run: |
+          set -euo pipefail
+          docker buildx imagetools create \
+            --tag "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest" \
+            "${{ steps.image.outputs.ref }}"
 
       - name: Discord notification (success)
         if: success() && github.ref == 'refs/heads/main'

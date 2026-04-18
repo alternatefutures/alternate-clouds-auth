@@ -52,8 +52,13 @@ jobs:
           no-cache: true
           platforms: linux/amd64
           provenance: false
+          # IMPORTANT: :staging is the rolling pointer staging pulls
+          # via imagePullPolicy:Always, so it must NOT be moved until
+          # the supply-chain gate, rollout, and health check all pass
+          # (see "Promote :staging tag" step below). Per-commit
+          # staging-{sha} tag is fine to publish unconditionally for
+          # traceability / rollback.
           tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:staging
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:staging-${{ github.sha }}
 
       - name: Resolve immutable image reference
@@ -201,3 +206,14 @@ jobs:
             echo "healthy=false" >> $GITHUB_OUTPUT
             exit 1
           fi
+
+      # Promote :staging only after the full pipeline passes. Same
+      # reasoning as production :latest — the rolling tag should never
+      # point at an image that didn't successfully roll out.
+      - name: Promote :staging tag (post-verify)
+        if: success()
+        run: |
+          set -euo pipefail
+          docker buildx imagetools create \
+            --tag "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:staging" \
+            "${{ steps.image.outputs.ref }}"
