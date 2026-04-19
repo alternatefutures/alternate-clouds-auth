@@ -12,6 +12,7 @@ import { timingSafeCompare } from '../../utils/crypto';
 import { whitelistService } from '../../services/whitelist.service';
 import { auditLogService } from '../../services/auditLog.service';
 import { audit } from '../../lib/audit';
+import { notifyNewSignup } from '../../lib/discordNotifier';
 import { generateDeviceFingerprint } from '../../utils/fingerprint';
 
 const app = new Hono();
@@ -184,6 +185,14 @@ app.post('/verify', strictRateLimit, async (c) => {
         status: 'ok',
         userId: user.id,
         payload: { method: 'sms' },
+      });
+
+      void notifyNewSignup({
+        userId: user.id,
+        email: null,
+        identifier: phone,
+        method: 'SMS',
+        createdAt: new Date(),
       });
     } else {
       // Update existing user

@@ -9,6 +9,7 @@ import { encryptForStorage, generateCodeVerifier, generateCodeChallenge } from '
 import { whitelistService } from '../../services/whitelist.service';
 import { auditLogService } from '../../services/auditLog.service';
 import { audit } from '../../lib/audit';
+import { notifyNewSignup } from '../../lib/discordNotifier';
 import { generateDeviceFingerprint } from '../../utils/fingerprint';
 
 const app = new Hono();
@@ -281,6 +282,14 @@ app.get('/callback/:provider', async (c) => {
         status: 'ok',
         userId: user.id,
         payload: { method: 'oauth', provider },
+      });
+
+      void notifyNewSignup({
+        userId: user.id,
+        email: oauthUserInfo.email,
+        identifier: oauthUserInfo.email ?? oauthUserInfo.name ?? null,
+        method: `OAuth (${provider})`,
+        createdAt: new Date(),
       });
     }
 

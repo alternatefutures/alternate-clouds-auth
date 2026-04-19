@@ -12,6 +12,7 @@ import { strictRateLimit } from '../../middleware/ratelimit';
 import { whitelistService } from '../../services/whitelist.service';
 import { auditLogService } from '../../services/auditLog.service';
 import { audit } from '../../lib/audit';
+import { notifyNewSignup } from '../../lib/discordNotifier';
 import { generateDeviceFingerprint } from '../../utils/fingerprint';
 
 const app = new Hono();
@@ -192,6 +193,14 @@ app.post('/verify', strictRateLimit, async (c) => {
         status: 'ok',
         userId: user.id,
         payload: { method: 'email' },
+      });
+
+      void notifyNewSignup({
+        userId: user.id,
+        email,
+        identifier: email,
+        method: 'Email Magic Link',
+        createdAt: new Date(),
       });
     } else {
       // Update email verification status
