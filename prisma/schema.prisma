@@ -24,6 +24,34 @@ model AuthWhitelist {
   @@map("auth_whitelist")
 }
 
+// Self-service requests from users who hit the early-access gate.
+// Approving a row creates the matching `AuthWhitelist` entry and
+// triggers an "you're in" email; declining only flips the status so
+// the same email cannot spam the form again. Email is unique to make
+// the public submit endpoint trivially idempotent.
+enum WhitelistRequestStatus {
+  PENDING
+  APPROVED
+  DECLINED
+}
+
+model AuthWhitelistRequest {
+  id         String                 @id @default(uuid())
+  email      String                 @unique
+  name       String
+  reason     String                 @db.Text
+  status     WhitelistRequestStatus @default(PENDING)
+  ipAddress  String?                @map("ip_address")
+  userAgent  String?                @map("user_agent")
+  reviewedAt DateTime?              @map("reviewed_at")
+  reviewedBy String?                @map("reviewed_by") // admin email/id, free-form
+  createdAt  DateTime               @default(now()) @map("created_at")
+  updatedAt  DateTime               @updatedAt @map("updated_at")
+
+  @@index([status, createdAt])
+  @@map("auth_whitelist_requests")
+}
+
 // ============================================
 // AUTH CORE MODELS
 // ============================================
