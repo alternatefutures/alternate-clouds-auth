@@ -196,6 +196,87 @@ export class EmailService {
     });
   }
 
+  /**
+   * Confirm to the user that we received their access request.
+   * Intentionally short — the goal is just "we got it, you'll hear back".
+   * Falls back to console logging in dev / when no API key is set.
+   */
+  async sendWhitelistRequestReceived(email: string, name: string): Promise<void> {
+    if (!this.apiKey || process.env.NODE_ENV === 'development') {
+      console.log(`[Email] Whitelist request received for ${email} (${name})`);
+      return;
+    }
+
+    const subject = `We received your Alternate Clouds access request`;
+    const safeName = name && name.trim().length > 0 ? name.trim() : 'there';
+    const text = `Hi ${safeName},\n\nThanks for requesting access to Alternate Clouds. We'll review your request and get back to you soon.\n\n— The Alternate Clouds team`;
+    const html = `
+      <!DOCTYPE html>
+      <html>
+        <head><meta charset="utf-8"></head>
+        <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; line-height: 1.6; color: #333;">
+          <div style="max-width: 600px; margin: 0 auto; padding: 20px;">
+            <h2 style="color: #0026FF;">Request received</h2>
+            <p>Hi ${safeName},</p>
+            <p>Thanks for requesting access to <strong>Alternate Clouds</strong>. We'll review your request and get back to you soon.</p>
+            <p style="color: #6b7280; font-size: 14px;">
+              In the meantime, feel free to follow our progress on
+              <a href="https://x.com/AltFuturesAI" style="color: #0026FF;">X</a>,
+              <a href="https://www.linkedin.com/company/alternate-futures-ai" style="color: #0026FF;">LinkedIn</a>, or
+              <a href="https://discord.gg/YW6zZfZZUU" style="color: #0026FF;">Discord</a>.
+            </p>
+            <div style="font-size: 12px; color: #666; margin-top: 40px; border-top: 1px solid #eee; padding-top: 16px;">
+              <p>&copy; ${new Date().getFullYear()} Alternate Clouds. All rights reserved.</p>
+            </div>
+          </div>
+        </body>
+      </html>
+    `;
+
+    await this.sendEmail({ to: email, subject, text, html });
+  }
+
+  /**
+   * Notify the user that their access request was approved and link
+   * them straight to the sign-in page.
+   */
+  async sendWhitelistApproved(email: string, name: string, signInUrl: string): Promise<void> {
+    if (!this.apiKey || process.env.NODE_ENV === 'development') {
+      console.log(`[Email] Whitelist approved for ${email} (${name})`);
+      return;
+    }
+
+    const subject = `You're in — welcome to Alternate Clouds`;
+    const safeName = name && name.trim().length > 0 ? name.trim() : 'there';
+    const text = `Hi ${safeName},\n\nGood news — your Alternate Clouds access request was approved. Sign in here:\n\n${signInUrl}\n\n— The Alternate Clouds team`;
+    const html = `
+      <!DOCTYPE html>
+      <html>
+        <head><meta charset="utf-8"></head>
+        <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; line-height: 1.6; color: #333;">
+          <div style="max-width: 600px; margin: 0 auto; padding: 20px;">
+            <h2 style="color: #10b981;">You're in</h2>
+            <p>Hi ${safeName},</p>
+            <p>Good news — your access request was approved. You can sign in to <strong>Alternate Clouds</strong> now:</p>
+            <a href="${signInUrl}"
+               style="display: inline-block; background: #0026FF; color: white; padding: 12px 24px;
+                      border-radius: 6px; text-decoration: none; margin: 16px 0; font-weight: 600;">
+              Sign in
+            </a>
+            <p style="color: #6b7280; font-size: 14px;">If the button doesn't work, paste this link into your browser:<br/>
+              <span style="word-break: break-all;">${signInUrl}</span>
+            </p>
+            <div style="font-size: 12px; color: #666; margin-top: 40px; border-top: 1px solid #eee; padding-top: 16px;">
+              <p>&copy; ${new Date().getFullYear()} Alternate Clouds. All rights reserved.</p>
+            </div>
+          </div>
+        </body>
+      </html>
+    `;
+
+    await this.sendEmail({ to: email, subject, text, html });
+  }
+
   async sendAccessSuspendedEmail(email: string, orgName: string, orgId: string): Promise<void> {
     if (!this.apiKey || process.env.NODE_ENV === 'development') {
       console.log(`[Email] Access suspended notification for ${email} (org: ${orgName})`);

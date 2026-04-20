@@ -22,6 +22,10 @@ const WEBHOOK_URL_ENV = 'DISCORD_SIGNUPS_WEBHOOK_URL';
 const WEBHOOK_TIMEOUT_MS = 5_000;
 const SIGNUP_DEDUPE_TTL_MS = 60 * 60 * 1000;
 const DISCORD_COLOR_SIGNUP = 0x22c55e;
+// Amber for whitelist requests so the embed visually reads as
+// "needs your attention" — same convention as bug/feature reports
+// (red/blue/purple) in service-cloud-api/src/resolvers/feedback.ts.
+const DISCORD_COLOR_WHITELIST_REQUEST = 0xf59e0b;
 
 const dedupeFiredAt = new Map<string, number>();
 
@@ -96,6 +100,86 @@ export async function notifyNewSignup(
   } catch (err) {
     console.warn(
       `[discord-notifier] webhook failed for signup ${signup.userId}:`,
+      err instanceof Error ? err.message : err,
+    );
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+export interface WhitelistRequestNotification {
+  email: string;
+  name: string;
+  reason: string;
+  ipAddress?: string | null;
+  createdAt: Date;
+}
+
+/**
+ * Ping Discord when a user submits a whitelist (early-access) request.
+ * Reuses the SIGNUPS webhook intentionally (same channel, distinct
+ * styling) — admin asked for visually-different messages, not a
+ * second channel. Amber + 🚪 distinguishes "needs review" from the
+ * green "👋 New signup" embeds.
+ */
+export async function notifyWhitelistRequest(
+  request: WhitelistRequestNotification,
+): Promise<void> {
+  const webhookUrl = process.env[WEBHOOK_URL_ENV];
+  if (!webhookUrl) return;
+
+  // Truncate generous but bounded; Discord embed field cap is 1024.
+  const truncatedReason =
+    request.reason.length > 1000
+      ? request.reason.slice(0, 997) + '...'
+      : request.reason;
+
+  const fields = [
+    { name: 'Name', value: request.name || '(none)', inline: true },
+    { name: 'Email', value: request.email, inline: true },
+    {
+      name: 'Date',
+      value: request.createdAt.toISOString(),
+      inline: true,
+    },
+    {
+      name: 'What they want to build',
+      value: truncatedReason || '(none)',
+      inline: false,
+    },
+  ];
+
+  if (request.ipAddress) {
+    fields.push({ name: 'IP', value: request.ipAddress, inline: true });
+  }
+
+  const embed = {
+    title: '🚪 Access request',
+    color: DISCORD_COLOR_WHITELIST_REQUEST,
+    fields,
+    timestamp: request.createdAt.toISOString(),
+    footer: {
+      text: `service-auth · whitelist request · ${process.env.NODE_ENV ?? 'unknown'}`,
+    },
+  };
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), WEBHOOK_TIMEOUT_MS);
+  try {
+    const res = await fetch(webhookUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ embeds: [embed] }),
+      signal: controller.signal,
+    });
+    if (!res.ok) {
+      console.warn(
+        `[discord-notifier] whitelist webhook returned ${res.status} for ${request.email}`,
+      );
+    }
+  } catch (err) {
+    console.warn(
+      `[discord-notifier] whitelist webhook failed for ${request.email}:`,
       err instanceof Error ? err.message : err,
     );
   } finally {
