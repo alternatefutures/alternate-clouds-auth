@@ -5,6 +5,7 @@
 
 import { Hono } from 'hono';
 import { nanoid } from 'nanoid';
+import { audit } from '../../lib/audit';
 import { dbService } from '../../services/db.service';
 import { getProvider, isProviderAvailable } from '../../services/payments';
 import {
@@ -615,100 +616,202 @@ async function processStaxEvent(event: WebhookEvent): Promise<void> {
   }
 }
 
+/**
+ * Reject a Relay payment.completed event with a structured audit
+ * trail. The thrown error bubbles up to the outer handler which
+ * returns 500 → Relay retries; if the rejection was correct the
+ * retries will keep failing (desired).
+ */
+function rejectRelayPayment(args: {
+  reason: string;
+  paymentId?: string;
+  txHash?: string;
+  details?: Record<string, unknown>;
+}): never {
+  audit(dbService.prismaClient, {
+    category: 'billing',
+    action: 'billing.topup.crypto.rejected',
+    status: 'error',
+    payload: {
+      reason: args.reason,
+      paymentId: args.paymentId,
+      txHash: args.txHash,
+      ...(args.details ?? {}),
+    },
+  });
+  console.error('Relay payment.completed REJECTED', args);
+  throw new Error(`relay_rejected:${args.reason}`);
+}
+
 async function processRelayEvent(event: WebhookEvent): Promise<void> {
   const data = event.data as Record<string, unknown>;
 
   switch (event.type) {
     case 'payment.completed': {
-      const txHash = data.txHash as string;
+      const txHash = typeof data.txHash === 'string' ? data.txHash : '';
+      const metadata = data.metadata as Record<string, string> | undefined;
 
-      // Independently verify the on-chain transaction before crediting
-      // anyone. The webhook HMAC is necessary but not sufficient — if
-      // the shared secret leaks, an attacker can forge `payment.completed`
-      // events. Chain verification is the second factor.
+      // === Server-of-truth lookup ===========================================
+      // We MUST be able to identify the local auth_payments row that
+      // this webhook is settling. Two lookup keys:
+      //   1. metadata.paymentId — set by us in /topup/crypto/create
+      //   2. txHash — set by us when we previously partially-processed
+      //      the same event
+      // If neither resolves to a row, this webhook is for a payment we
+      // didn't initiate; we reject it. The legacy "fall-through to
+      // create a brand new auth_payments row from raw webhook data"
+      // path was a forgery vector and is gone.
+      const paymentById = metadata?.paymentId
+        ? await dbService.getPaymentById(metadata.paymentId)
+        : null;
+      const paymentByTx = txHash ? await dbService.getPaymentByTxHash(txHash) : null;
+
+      // Cross-check: if we resolved a row by both keys they MUST be the
+      // same row. A mismatch means the webhook is mapping a known
+      // txHash onto someone else's paymentId — drop it.
+      if (paymentById && paymentByTx && paymentById.id !== paymentByTx.id) {
+        rejectRelayPayment({
+          reason: 'payment_id_tx_hash_mismatch',
+          paymentId: metadata?.paymentId,
+          txHash,
+          details: { byId: paymentById.id, byTx: paymentByTx.id },
+        });
+      }
+      const payment = paymentById ?? paymentByTx;
+      if (!payment) {
+        rejectRelayPayment({
+          reason: 'unknown_payment',
+          paymentId: metadata?.paymentId,
+          txHash,
+        });
+      }
+      if (payment.provider !== 'relay') {
+        rejectRelayPayment({
+          reason: 'wrong_provider',
+          paymentId: payment.id,
+          txHash,
+          details: { provider: payment.provider },
+        });
+      }
+
+      // Idempotent short-circuit: if we already settled this row, we
+      // are done. The webhook event row was de-duped earlier; this is
+      // a defence against a Relay retry that crosses the de-dupe
+      // window after we already credited.
+      if (payment.status === 'SUCCEEDED') {
+        break;
+      }
+
+      // === Build verification input from the LOCAL payment row only ========
+      // Anything echoed back in `data.*` is treated as advisory at
+      // most. The on-chain re-check answers a single question:
+      // "did the recipient/contract/amount we recorded actually
+      // receive a real transfer with this txHash on the chain we
+      // recorded?" The webhook is not allowed to reframe that
+      // question.
+      const expectedToAddress = payment.to_address ?? '';
+      const chainId = payment.blockchain ? Number(payment.blockchain) : NaN;
+      const tokenSymbol = payment.token_symbol;
+      const tokenAddress = payment.token_address;
+
+      if (!expectedToAddress || !Number.isFinite(chainId) || chainId <= 0) {
+        rejectRelayPayment({
+          reason: 'payment_record_incomplete',
+          paymentId: payment.id,
+          txHash,
+          details: {
+            hasToAddress: Boolean(expectedToAddress),
+            chainId: payment.blockchain,
+          },
+        });
+      }
+      if (!txHash) {
+        rejectRelayPayment({
+          reason: 'missing_tx_hash',
+          paymentId: payment.id,
+        });
+      }
+
+      // === On-chain re-check (HMAC bypass defence) =========================
       const chainVerifyRequired = isChainVerifyRequired();
       const verification = await verifyRelayPaymentOnChain({
         txHash,
-        chainId: Number(data.chainId ?? 0),
-        expectedToAddress: String(data.toAddress ?? ''),
-        expectedAmountCents: Math.round(parseFloat(String(data.amount ?? '0')) * 100),
-        tokenSymbol: typeof data.tokenSymbol === 'string' ? data.tokenSymbol : undefined,
-        tokenAddress: typeof data.tokenAddress === 'string' ? data.tokenAddress : undefined,
+        chainId,
+        expectedToAddress,
+        expectedAmountCents: payment.amount,
+        tokenSymbol,
+        tokenAddress,
       });
       if (!verification.ok) {
-        const logCtx = {
-          txHash,
-          chainId: data.chainId,
-          reason: verification.reason,
-          details: verification.details,
-        };
         if (chainVerifyRequired) {
-          console.error('Relay payment.completed REJECTED — chain verification failed', logCtx);
-          // Throw so the outer handler returns 500 and Relay retries.
-          // If the rejection was correct (forged event) the retries
-          // will keep failing, which is the desired outcome.
-          throw new Error(`relay_chain_verify_failed:${verification.reason}`);
+          rejectRelayPayment({
+            reason: `chain_verify_failed:${verification.reason}`,
+            paymentId: payment.id,
+            txHash,
+            details: { ...verification.details, chainId },
+          });
         }
         console.warn(
           'Relay chain verification failed but RELAY_REQUIRE_CHAIN_VERIFY=false — proceeding (KILL SWITCH ACTIVE)',
-          logCtx,
+          { paymentId: payment.id, txHash, chainId, reason: verification.reason },
         );
       }
 
-      const payment = await dbService.getPaymentByTxHash(txHash);
-      if (payment) {
-        if (payment.status === 'SUCCEEDED') {
-          break;
-        }
+      // === Persist the verified facts ======================================
+      // Store the fromAddress reported by Relay (cosmetic; we already
+      // verified the recipient on-chain) and freeze tx_hash so a
+      // future webhook can't quietly substitute a different one.
+      await dbService.updatePayment(payment.id, {
+        status: 'SUCCEEDED',
+        tx_hash: txHash,
+        from_address: typeof data.fromAddress === 'string' ? data.fromAddress : undefined,
+      });
 
-        await dbService.updatePayment(payment.id, { status: 'SUCCEEDED' });
+      // === Credit the right wallet =========================================
+      // For org credit top-ups, look up the customer record (server
+      // truth) to derive `actorUserId` rather than trusting
+      // `metadata.userId` from the webhook.
+      if (payment.org_billing_id) {
+        const customer = await dbService.getBillingCustomerById(payment.customer_id);
+        const result = await processTopupFromWebhook({
+          paymentIntentId: `relay:${payment.id}:${txHash}`,
+          orgBillingId: payment.org_billing_id,
+          amountCents: payment.amount,
+          userId: customer?.user_id,
+          organizationId: metadata?.orgId,
+        });
+        audit(dbService.prismaClient, {
+          category: 'billing',
+          action: 'billing.topup.crypto.settled',
+          status: 'ok',
+          userId: customer?.user_id ?? null,
+          orgId: metadata?.orgId ?? null,
+          payload: {
+            paymentId: payment.id,
+            txHash,
+            chainId,
+            tokenSymbol,
+            amountCents: payment.amount,
+            balanceCents: result.balanceCents,
+            alreadyProcessed: result.alreadyProcessed,
+          },
+        });
+        console.log(`Crypto topup processed via Relay: $${(result.amountAddedCents / 100).toFixed(2)} added, balance: $${(result.balanceCents / 100).toFixed(2)}, alreadyProcessed: ${result.alreadyProcessed}`);
+        break;
+      }
 
-        if (payment.invoice_id) {
-          const invoice = await dbService.getInvoiceById(payment.invoice_id);
-          if (invoice && invoice.status !== 'PAID') {
-            const newAmountPaid = invoice.amount_paid + payment.amount;
-            const newAmountDue = invoice.total - newAmountPaid;
-            await dbService.updateInvoice(invoice.id, {
-              amount_paid: newAmountPaid,
-              amount_due: newAmountDue,
-              status: newAmountDue <= 0 ? 'PAID' : 'OPEN',
-              paid_at: newAmountDue <= 0 ? Date.now() : undefined,
-            });
-          }
-        }
-      } else {
-        // Payment not found - it might be a new payment we haven't recorded
-        // This could happen if user sends crypto directly without going through our flow
-        const metadata = data.metadata as Record<string, string>;
-        if (metadata?.invoiceId) {
-          const invoice = await dbService.getInvoiceById(metadata.invoiceId);
-          if (invoice) {
-            // Record the payment
-            const amount = Math.round(parseFloat(data.amount as string) * 100);
-            await dbService.createPayment({
-              id: nanoid(),
-              customer_id: invoice.customer_id,
-              invoice_id: invoice.id,
-              amount,
-              currency: invoice.currency,
-              status: 'SUCCEEDED',
-              provider: 'relay',
-              tx_hash: txHash,
-              blockchain: data.chainId?.toString() || 'unknown',
-              from_address: data.fromAddress as string,
-              to_address: data.toAddress as string,
-            });
-
-            // Update invoice
-            const newAmountPaid = invoice.amount_paid + amount;
-            const newAmountDue = invoice.total - newAmountPaid;
-            await dbService.updateInvoice(invoice.id, {
-              amount_paid: newAmountPaid,
-              amount_due: newAmountDue,
-              status: newAmountDue <= 0 ? 'PAID' : 'OPEN',
-              paid_at: newAmountDue <= 0 ? Date.now() : undefined,
-            });
-          }
+      // Invoice settlement path (one-off invoices paid in crypto).
+      if (payment.invoice_id) {
+        const invoice = await dbService.getInvoiceById(payment.invoice_id);
+        if (invoice && invoice.status !== 'PAID') {
+          const newAmountPaid = invoice.amount_paid + payment.amount;
+          const newAmountDue = invoice.total - newAmountPaid;
+          await dbService.updateInvoice(invoice.id, {
+            amount_paid: newAmountPaid,
+            amount_due: newAmountDue,
+            status: newAmountDue <= 0 ? 'PAID' : 'OPEN',
+            paid_at: newAmountDue <= 0 ? Date.now() : undefined,
+          });
         }
       }
       break;
@@ -716,12 +819,14 @@ async function processRelayEvent(event: WebhookEvent): Promise<void> {
 
     case 'payment.failed':
     case 'payment.expired': {
-      const paymentId = data.paymentId as string;
-      // Try to find by our payment ID in metadata
-      const metadata = data.metadata as Record<string, string>;
+      const metadata = data.metadata as Record<string, string> | undefined;
+      // Only a payment we created can be failed/expired by this hook.
+      // We do not accept failure events for arbitrary tx hashes — a
+      // forged failure event with no metadata cannot harm us so the
+      // strict shape check is purely defence-in-depth.
       if (metadata?.paymentId) {
         const payment = await dbService.getPaymentById(metadata.paymentId);
-        if (payment) {
+        if (payment && payment.provider === 'relay' && payment.status === 'PENDING') {
           await dbService.updatePayment(payment.id, {
             status: 'FAILED',
             failure_reason: event.type === 'payment.expired' ? 'Payment expired' : 'Payment failed',

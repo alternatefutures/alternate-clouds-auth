@@ -101,9 +101,13 @@ app.post('/challenge', strictRateLimit, async (c) => {
  */
 app.post('/verify', strictRateLimit, async (c) => {
   try {
-    // Validate request body
+    // Validate request body. We accept `message` from the client only as
+    // a hint for parsing the nonce; the signature is ALWAYS verified
+    // against the canonical `challenge.message` we issued and stored —
+    // never the client's copy. This blocks the "swap-the-message-keep-
+    // the-nonce" phishing replay (EIP-4361 §7).
     const body = await c.req.json();
-    const { address, signature, message } = walletVerifySchema.parse(body);
+    const { address, signature, message: clientMessage } = walletVerifySchema.parse(body);
 
     // Solana wallets are accepted by the validator but not yet supported
     if (validateSolanaAddress(address)) {
@@ -113,14 +117,17 @@ app.post('/verify', strictRateLimit, async (c) => {
       }, 501);
     }
 
-    // Parse nonce from message
-    const nonceMatch = message.match(/Nonce: (.+)/);
+    // Parse nonce from the client message ONLY to look up which DB
+    // challenge they're attempting to satisfy. The matched value is
+    // tightly constrained.
+    const nonceMatch = clientMessage.match(/^Nonce: ([A-Za-z0-9_-]{8,64})$/m);
     if (!nonceMatch) {
       return c.json({ error: 'Invalid message format' }, 400);
     }
     const nonce = nonceMatch[1];
 
-    // Get challenge from database
+    // Get unverified challenge from database (filtered by verified=false
+    // inside getSIWEChallengeByAddressAndNonce)
     const challenge = await dbService.getSIWEChallengeByAddressAndNonce(
       address.toLowerCase(),
       nonce
@@ -135,8 +142,9 @@ app.post('/verify', strictRateLimit, async (c) => {
       return c.json({ error: 'Challenge has expired' }, 400);
     }
 
-    // Verify signature
-    const isValid = siweService.verifySignature(message, signature, address);
+    // Verify signature against the SERVER-stored message — never the
+    // client's. The client's `message` is a hint, not an oracle.
+    const isValid = siweService.verifySignature(challenge.message, signature, address);
 
     if (!isValid) {
       await auditLogService.logFromContext(c, {
@@ -146,8 +154,16 @@ app.post('/verify', strictRateLimit, async (c) => {
       return c.json({ error: 'Invalid signature' }, 400);
     }
 
-    // Mark challenge as verified
-    await dbService.verifySIWEChallenge(challenge.id);
+    // Atomically claim the challenge — concurrent /verify calls for the
+    // same nonce will only see one `true`. If we lose the race, refuse.
+    const claimed = await dbService.claimSIWEChallenge(challenge.id);
+    if (!claimed) {
+      await auditLogService.logFromContext(c, {
+        eventType: 'LOGIN_FAILURE',
+        metadata: { method: 'wallet', reason: 'challenge_already_claimed', address: address.toLowerCase() },
+      });
+      return c.json({ error: 'Challenge already used' }, 409);
+    }
 
     // Whitelist gate
     const wl = await whitelistService.check403(address);
