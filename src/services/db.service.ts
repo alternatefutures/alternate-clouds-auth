@@ -308,6 +308,12 @@ export interface Payment {
   blockchain?: string;
   from_address?: string;
   to_address?: string;
+  /** Stablecoin symbol (e.g. USDC) chosen at intent creation time. */
+  token_symbol?: string;
+  /** Canonical ERC-20 contract for the (chainId, token_symbol) pair. */
+  token_address?: string;
+  /** Org wallet credited on settlement; never read from webhook. */
+  org_billing_id?: string;
   failure_reason?: string;
   created_at: number;
   updated_at: number;
@@ -1108,6 +1114,21 @@ export class DatabaseService {
         verifiedAt: new Date(),
       },
     });
+  }
+
+  /**
+   * Atomically claim a SIWE challenge: marks it verified only if it was
+   * still unverified. Returns true if THIS caller is the one who claimed
+   * the challenge (and therefore is allowed to proceed with login). Two
+   * concurrent /verify calls for the same challenge will only see one
+   * `true`; the other gets `false` and must be rejected by the caller.
+   */
+  async claimSIWEChallenge(id: string): Promise<boolean> {
+    const result = await this.prisma.sIWEChallenge.updateMany({
+      where: { id, verified: false },
+      data: { verified: true, verifiedAt: new Date() },
+    });
+    return result.count === 1;
   }
 
   async getSIWEChallengeByAddressAndNonce(address: string, nonce: string): Promise<SIWEChallenge | null> {
@@ -2579,6 +2600,9 @@ export class DatabaseService {
         blockchain: payment.blockchain,
         fromAddress: payment.from_address,
         toAddress: payment.to_address,
+        tokenSymbol: payment.token_symbol,
+        tokenAddress: payment.token_address,
+        orgBillingId: payment.org_billing_id,
         failureReason: payment.failure_reason,
       },
     });
@@ -2598,6 +2622,9 @@ export class DatabaseService {
       blockchain: result.blockchain ?? undefined,
       from_address: result.fromAddress ?? undefined,
       to_address: result.toAddress ?? undefined,
+      token_symbol: result.tokenSymbol ?? undefined,
+      token_address: result.tokenAddress ?? undefined,
+      org_billing_id: result.orgBillingId ?? undefined,
       failure_reason: result.failureReason ?? undefined,
       created_at: result.createdAt.getTime(),
       updated_at: result.updatedAt.getTime(),
@@ -2625,6 +2652,9 @@ export class DatabaseService {
       blockchain: result.blockchain ?? undefined,
       from_address: result.fromAddress ?? undefined,
       to_address: result.toAddress ?? undefined,
+      token_symbol: result.tokenSymbol ?? undefined,
+      token_address: result.tokenAddress ?? undefined,
+      org_billing_id: result.orgBillingId ?? undefined,
       failure_reason: result.failureReason ?? undefined,
       created_at: result.createdAt.getTime(),
       updated_at: result.updatedAt.getTime(),
@@ -2636,6 +2666,13 @@ export class DatabaseService {
 
     if (updates.status !== undefined) data.status = updates.status;
     if (updates.failure_reason !== undefined) data.failureReason = updates.failure_reason;
+    if (updates.tx_hash !== undefined) data.txHash = updates.tx_hash;
+    if (updates.blockchain !== undefined) data.blockchain = updates.blockchain;
+    if (updates.from_address !== undefined) data.fromAddress = updates.from_address;
+    if (updates.to_address !== undefined) data.toAddress = updates.to_address;
+    if (updates.token_symbol !== undefined) data.tokenSymbol = updates.token_symbol;
+    if (updates.token_address !== undefined) data.tokenAddress = updates.token_address;
+    if (updates.org_billing_id !== undefined) data.orgBillingId = updates.org_billing_id;
 
     await this.prisma.payment.update({
       where: { id },
@@ -2664,6 +2701,9 @@ export class DatabaseService {
       blockchain: result.blockchain ?? undefined,
       from_address: result.fromAddress ?? undefined,
       to_address: result.toAddress ?? undefined,
+      token_symbol: result.tokenSymbol ?? undefined,
+      token_address: result.tokenAddress ?? undefined,
+      org_billing_id: result.orgBillingId ?? undefined,
       failure_reason: result.failureReason ?? undefined,
       created_at: result.createdAt.getTime(),
       updated_at: result.updatedAt.getTime(),
@@ -2691,6 +2731,9 @@ export class DatabaseService {
       blockchain: result.blockchain ?? undefined,
       from_address: result.fromAddress ?? undefined,
       to_address: result.toAddress ?? undefined,
+      token_symbol: result.tokenSymbol ?? undefined,
+      token_address: result.tokenAddress ?? undefined,
+      org_billing_id: result.orgBillingId ?? undefined,
       failure_reason: result.failureReason ?? undefined,
       created_at: result.createdAt.getTime(),
       updated_at: result.updatedAt.getTime(),
@@ -2718,6 +2761,9 @@ export class DatabaseService {
       blockchain: result.blockchain ?? undefined,
       from_address: result.fromAddress ?? undefined,
       to_address: result.toAddress ?? undefined,
+      token_symbol: result.tokenSymbol ?? undefined,
+      token_address: result.tokenAddress ?? undefined,
+      org_billing_id: result.orgBillingId ?? undefined,
       failure_reason: result.failureReason ?? undefined,
       created_at: result.createdAt.getTime(),
       updated_at: result.updatedAt.getTime(),
@@ -2743,6 +2789,9 @@ export class DatabaseService {
       blockchain: result.blockchain ?? undefined,
       from_address: result.fromAddress ?? undefined,
       to_address: result.toAddress ?? undefined,
+      token_symbol: result.tokenSymbol ?? undefined,
+      token_address: result.tokenAddress ?? undefined,
+      org_billing_id: result.orgBillingId ?? undefined,
       failure_reason: result.failureReason ?? undefined,
       created_at: result.createdAt.getTime(),
       updated_at: result.updatedAt.getTime(),

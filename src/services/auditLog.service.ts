@@ -26,7 +26,10 @@ export type AuditEventType =
   | 'PROFILE_UPDATE'
   | 'AUTH_METHOD_LINK'
   | 'AUTH_METHOD_UNLINK'
-  | 'WHITELIST_MUTATE';
+  | 'WHITELIST_MUTATE'
+  | 'BILLING_TOPUP_CRYPTO_CREATED'
+  | 'BILLING_TOPUP_CRYPTO_SETTLED'
+  | 'BILLING_TOPUP_CRYPTO_REJECTED';
 
 // Map the legacy event-type alphabet onto the unified (category, action,
 // status) tuple the cross-service `audit()` helper consumes. Keeping the
@@ -62,6 +65,9 @@ const EVENT_MAPPING: Record<
   AUTH_METHOD_LINK: { category: 'user', action: 'user.auth_method.link', defaultStatus: 'ok' },
   AUTH_METHOD_UNLINK: { category: 'user', action: 'user.auth_method.unlink', defaultStatus: 'ok' },
   WHITELIST_MUTATE: { category: 'system', action: 'admin.whitelist.mutate', defaultStatus: 'ok' },
+  BILLING_TOPUP_CRYPTO_CREATED: { category: 'billing', action: 'billing.topup.crypto.created', defaultStatus: 'ok' },
+  BILLING_TOPUP_CRYPTO_SETTLED: { category: 'billing', action: 'billing.topup.crypto.settled', defaultStatus: 'ok' },
+  BILLING_TOPUP_CRYPTO_REJECTED: { category: 'billing', action: 'billing.topup.crypto.rejected', defaultStatus: 'error' },
 };
 
 export interface AuditLogEvent {
