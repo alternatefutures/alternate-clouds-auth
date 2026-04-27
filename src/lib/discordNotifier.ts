@@ -109,6 +109,8 @@ export async function notifyNewSignup(
 
 export interface WhitelistRequestNotification {
   email: string;
+  identifier: string;
+  identifierType: string;
   name: string;
   reason: string;
   ipAddress?: string | null;
@@ -136,7 +138,8 @@ export async function notifyWhitelistRequest(
 
   const fields = [
     { name: 'Name', value: request.name || '(none)', inline: true },
-    { name: 'Email', value: request.email, inline: true },
+    { name: 'Contact email', value: request.email, inline: true },
+    { name: 'Identifier', value: `${request.identifierType}: ${request.identifier}`, inline: false },
     {
       name: 'Date',
       value: request.createdAt.toISOString(),

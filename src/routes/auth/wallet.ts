@@ -120,7 +120,7 @@ app.post('/verify', strictRateLimit, async (c) => {
     // Parse nonce from the client message ONLY to look up which DB
     // challenge they're attempting to satisfy. The matched value is
     // tightly constrained.
-    const nonceMatch = clientMessage.match(/^Nonce: ([A-Za-z0-9_-]{8,64})$/m);
+    const nonceMatch = clientMessage.match(/^Nonce: ([A-Za-z0-9_+/=-]{8,88})$/m);
     if (!nonceMatch) {
       return c.json({ error: 'Invalid message format' }, 400);
     }

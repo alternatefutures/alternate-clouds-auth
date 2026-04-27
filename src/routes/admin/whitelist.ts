@@ -124,7 +124,9 @@ app.post('/requests/:id/approve', async (c) => {
     eventType: 'WHITELIST_MUTATE',
     metadata: {
       action: 'request_approve',
-      identifier: updated.email,
+      identifier: updated.identifier,
+      identifierType: updated.identifierType,
+      contactEmail: updated.email,
       requestId: updated.id,
       reviewedBy,
     },
@@ -144,7 +146,9 @@ app.post('/requests/:id/decline', async (c) => {
     eventType: 'WHITELIST_MUTATE',
     metadata: {
       action: 'request_decline',
-      identifier: updated.email,
+      identifier: updated.identifier,
+      identifierType: updated.identifierType,
+      contactEmail: updated.email,
       requestId: updated.id,
       reviewedBy,
     },

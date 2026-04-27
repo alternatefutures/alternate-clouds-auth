@@ -1,9 +1,9 @@
 /**
  * Public route for self-service whitelist requests.
  *
- * Anyone blocked by the early-access gate (`/auth/email/request`
- * returning 403 access_restricted) can POST here with their name,
- * email, and a short pitch. We:
+ * Anyone blocked by the early-access gate can POST here with their
+ * contact email, the blocked identifier (email or wallet), their name,
+ * and a short pitch. We:
  *   1. Persist the row (idempotent on email).
  *   2. Send them a "we got it" confirmation email.
  *   3. Ping Discord (#signups, amber styling) so the team sees it.
@@ -24,6 +24,8 @@ const app = new Hono();
 
 const submitSchema = z.object({
   email: z.string().email().max(254),
+  identifier: z.string().min(1).max(254).optional(),
+  identifierType: z.enum(['email', 'phone', 'wallet']).optional(),
   name: z.string().min(1).max(120),
   reason: z.string().min(1).max(2000),
 });
@@ -31,7 +33,7 @@ const submitSchema = z.object({
 app.post('/', strictRateLimit, async (c) => {
   try {
     const body = await c.req.json();
-    const { email, name, reason } = submitSchema.parse(body);
+    const { email, identifier, identifierType, name, reason } = submitSchema.parse(body);
 
     const ipAddress =
       c.req.header('x-forwarded-for') || c.req.header('x-real-ip') || undefined;
@@ -39,6 +41,8 @@ app.post('/', strictRateLimit, async (c) => {
 
     const result = await whitelistRequestService.create({
       email,
+      identifier,
+      identifierType,
       name,
       reason,
       ipAddress,
@@ -70,6 +74,8 @@ app.post('/', strictRateLimit, async (c) => {
 
     void notifyWhitelistRequest({
       email: result.request.email,
+      identifier: result.request.identifier,
+      identifierType: result.request.identifierType,
       name: result.request.name,
       reason: result.request.reason,
       ipAddress: result.request.ipAddress,
@@ -80,7 +86,9 @@ app.post('/', strictRateLimit, async (c) => {
       eventType: 'WHITELIST_MUTATE',
       metadata: {
         action: 'request_submitted',
-        identifier: result.request.email,
+        identifier: result.request.identifier,
+        identifierType: result.request.identifierType,
+        contactEmail: result.request.email,
         requestId: result.request.id,
       },
     });
@@ -91,7 +99,7 @@ app.post('/', strictRateLimit, async (c) => {
     });
   } catch (err) {
     if (err instanceof z.ZodError) {
-      return c.json({ error: 'Invalid request data', details: err.errors }, 400);
+      return c.json({ error: 'Invalid request data', details: err.issues }, 400);
     }
     console.error('Whitelist request error:', err);
     return c.json({ error: 'Failed to submit request' }, 500);
