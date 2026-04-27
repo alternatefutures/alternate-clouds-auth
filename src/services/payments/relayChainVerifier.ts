@@ -91,9 +91,21 @@ export interface RelayVerifyInput {
    * Used to enforce a min-amount check for stablecoin transfers.
    */
   expectedAmountCents: number;
-  /** Symbol from the webhook (USDC/USDT/ETH/etc.). Optional. */
+  /**
+   * Stablecoin symbol we recorded when creating the intent. Optional
+   * for legacy native-token flows. The verifier will only attempt a
+   * strict amount check when both `tokenSymbol` is a recognised
+   * stablecoin and `tokenAddress` is present.
+   */
   tokenSymbol?: string;
-  /** ERC-20 contract address (lower-cased). Optional. If omitted we treat as native transfer. */
+  /**
+   * Canonical ERC-20 contract for the (chainId, tokenSymbol) pair, as
+   * resolved from our static allowlist at intent creation time and
+   * persisted on the payment row. The on-chain Transfer log MUST be
+   * emitted by this exact contract — anything else is rejected as a
+   * fake-ERC-20 spoof. Pass `undefined` to fall back to native-asset
+   * verification.
+   */
   tokenAddress?: string;
 }
 

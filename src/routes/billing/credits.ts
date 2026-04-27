@@ -5,10 +5,19 @@
  */
 
 import { Hono } from 'hono';
+import { nanoid } from 'nanoid';
 import { z } from 'zod';
 import { authMiddleware, requireAuthUser } from '../../middleware/auth';
+import { rateLimit, standardRateLimit } from '../../middleware/ratelimit';
+import { auditLogService } from '../../services/auditLog.service';
 import { dbService } from '../../services/db.service';
-import { getDefaultProvider } from '../../services/payments';
+import { getCryptoProvider, getDefaultProvider, isProviderAvailable } from '../../services/payments';
+import {
+  getCanonicalStablecoinAddress,
+  isSupportedChainId,
+  isSupportedStablecoin,
+  listSupportedStablecoinsForChain,
+} from '../../services/payments/stablecoinAllowlist';
 
 /**
  * Best-effort call to service-cloud-api to resume suspended compute after topup.
@@ -43,6 +52,30 @@ async function triggerComputeResumeCheck(args: {
 const app = new Hono();
 
 app.use('*', authMiddleware);
+// Apply a generous default rate limit to every credit-balance route.
+// Specific high-cost endpoints (topup creation) layer a stricter limit
+// on top of this. Without this baseline an authenticated attacker can
+// hammer the ledger / balance reads.
+app.use('*', standardRateLimit);
+
+/**
+ * Strict rate-limit for top-up creation endpoints. These routes mutate
+ * payment-provider state (Stripe payment intent, Relay deposit address)
+ * and create rows in `auth_payments`, so abuse has both fraud and
+ * cost-of-goods consequences. 10/minute/user is comfortably above any
+ * legitimate UI usage and well below abuse territory.
+ */
+const topupCreateRateLimit = rateLimit({
+  windowMs: 60 * 1000,
+  max: 10,
+  message: 'Too many top-up requests — slow down and try again in a minute',
+  keyGenerator: (c) => {
+    const user = c.get('user') as { userId?: string } | undefined;
+    const userId = user?.userId ?? c.req.header('x-forwarded-for') ?? 'unknown';
+    return `topup-create:${userId}`;
+  },
+  progressivePenalties: true,
+});
 
 // ============================================
 // VALIDATION SCHEMAS
@@ -58,6 +91,17 @@ const topupCreateIntentSchema = z.object({
 
 const topupFinalizeSchema = z.object({
   paymentIntentId: z.string().min(1, 'Payment intent ID is required'),
+});
+
+const cryptoTopupCreateSchema = z.object({
+  usdAmount: z.number()
+    .positive('USD amount must be positive')
+    .max(MAX_TOPUP_USD, `Topup amount cannot exceed $${MAX_TOPUP_USD.toLocaleString()}`),
+  // Bounded to chains we have an RPC AND a stablecoin allowlist for.
+  // The exact combination is rechecked below against the allowlist; the
+  // upper bound here is just a defence-in-depth.
+  chainId: z.number().int().min(1).max(1_000_000).optional().default(1),
+  tokenSymbol: z.string().trim().min(1).max(8).optional().default('USDC'),
 });
 
 // ============================================
@@ -225,7 +269,7 @@ app.get('/org/:orgId/usage', async (c) => {
  * POST /billing/credits/org/:orgId/topup/create-intent
  * Create a Stripe PaymentIntent for topping up balance
  */
-app.post('/org/:orgId/topup/create-intent', async (c) => {
+app.post('/org/:orgId/topup/create-intent', topupCreateRateLimit, async (c) => {
   try {
     const user = requireAuthUser(c);
     const { orgId } = c.req.param();
@@ -298,6 +342,138 @@ app.post('/org/:orgId/topup/create-intent', async (c) => {
     }
 
     return c.json({ error: 'Failed to create topup intent' }, 500);
+  }
+});
+
+/**
+ * POST /billing/credits/org/:orgId/topup/crypto/create
+ * Create a Relay crypto payment request for topping up org credits.
+ *
+ * Settlement happens asynchronously in /billing/webhooks/relay after
+ * the transaction is verified on-chain.
+ */
+app.post('/org/:orgId/topup/crypto/create', topupCreateRateLimit, async (c) => {
+  try {
+    const user = requireAuthUser(c);
+    const { orgId } = c.req.param();
+
+    const memberResult = await verifyOrgMembershipAndGetBilling(user.userId, orgId, ['OWNER', 'ADMIN']);
+    if ('error' in memberResult) {
+      return c.json({ error: memberResult.error }, memberResult.status as 403 | 404);
+    }
+
+    if (!isProviderAvailable('relay')) {
+      return c.json({ error: 'Crypto payments are not configured' }, 400);
+    }
+
+    const body = await c.req.json();
+    const data = cryptoTopupCreateSchema.parse(body);
+    const amountCents = Math.round(data.usdAmount * 100);
+    const tokenSymbolUpper = data.tokenSymbol.toUpperCase();
+
+    // Enforce server-side allowlist of supported (chainId, stablecoin)
+    // pairs. The allowlist is the single source of truth for which
+    // ERC-20 contract is "real" USDC/USDT/DAI on each chain. By
+    // resolving the canonical contract here and persisting it on the
+    // payment row we guarantee the settlement webhook can never be
+    // tricked into accepting a fake-ERC-20 transfer.
+    if (!isSupportedChainId(data.chainId)) {
+      return c.json({ error: 'Unsupported blockchain', code: 'UNSUPPORTED_CHAIN' }, 400);
+    }
+    if (!isSupportedStablecoin(tokenSymbolUpper)) {
+      return c.json({ error: 'Unsupported token. Use USDC, USDT or DAI.', code: 'UNSUPPORTED_TOKEN' }, 400);
+    }
+    const canonicalTokenAddress = getCanonicalStablecoinAddress(data.chainId, tokenSymbolUpper);
+    if (!canonicalTokenAddress) {
+      return c.json(
+        {
+          error: `${tokenSymbolUpper} is not supported on chain ${data.chainId}.`,
+          code: 'UNSUPPORTED_PAIR',
+          supported: listSupportedStablecoinsForChain(data.chainId),
+        },
+        400,
+      );
+    }
+
+    const paymentId = nanoid();
+    const customer = await dbService.getBillingCustomerByUserId(user.userId);
+    if (!customer) {
+      return c.json({ error: 'Customer not found' }, 404);
+    }
+
+    const provider = getCryptoProvider();
+    const paymentIntent = await provider.createPaymentIntent({
+      amount: amountCents,
+      currency: 'usd',
+      customerId: customer.id,
+      chainId: data.chainId,
+      tokenSymbol: tokenSymbolUpper.toLowerCase(),
+      metadata: {
+        type: 'org_credits_topup',
+        paymentId,
+        orgId,
+        orgBillingId: memberResult.orgBilling.id,
+        userId: user.userId,
+        amountCents: amountCents.toString(),
+      },
+    });
+
+    // Persist the *canonical* token contract — never the one Relay
+    // echoes back. The provider may include `tokenAddress` for
+    // convenience, but we do not trust it.
+    const payment = await dbService.createPayment({
+      id: paymentId,
+      customer_id: customer.id,
+      amount: amountCents,
+      currency: 'usd',
+      status: 'PENDING',
+      provider: 'relay',
+      blockchain: String(data.chainId),
+      to_address: paymentIntent.depositAddress,
+      token_symbol: tokenSymbolUpper,
+      token_address: canonicalTokenAddress,
+      org_billing_id: memberResult.orgBilling.id,
+    });
+
+    auditLogService
+      .logFromContext(c, {
+        eventType: 'BILLING_TOPUP_CRYPTO_CREATED',
+        userId: user.userId,
+        metadata: {
+          paymentId,
+          orgId,
+          orgBillingId: memberResult.orgBilling.id,
+          chainId: data.chainId,
+          tokenSymbol: tokenSymbolUpper,
+          tokenAddress: canonicalTokenAddress,
+          depositAddress: paymentIntent.depositAddress,
+          amountCents,
+        },
+      })
+      .catch(() => {/* never block on audit */});
+
+    return c.json({
+      payment: {
+        id: payment.id,
+        status: payment.status,
+        amountCents,
+        amountUsd: (amountCents / 100).toFixed(2),
+        currency: payment.currency,
+        depositAddress: paymentIntent.depositAddress,
+        chainId: data.chainId,
+        tokenAddress: canonicalTokenAddress,
+        tokenSymbol: tokenSymbolUpper,
+        expiresAt: paymentIntent.expiresAt,
+      },
+    });
+  } catch (error) {
+    console.error('Create crypto topup error:', error);
+
+    if (error instanceof z.ZodError) {
+      return c.json({ error: 'Invalid request data', details: error.issues }, 400);
+    }
+
+    return c.json({ error: 'Failed to create crypto topup' }, 500);
   }
 });
 

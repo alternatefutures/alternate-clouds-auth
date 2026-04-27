@@ -467,6 +467,17 @@ model Payment {
   blockchain            String?
   fromAddress           String?   @map("from_address")
   toAddress             String?   @map("to_address")
+  /// Server-chosen stablecoin symbol for crypto top-ups. The Relay
+  /// webhook's claimed token must match this value before we credit.
+  tokenSymbol           String?   @map("token_symbol")
+  /// Canonical ERC-20 contract address resolved at intent creation
+  /// from the (chainId, tokenSymbol) allowlist. Never trusted from
+  /// webhook input.
+  tokenAddress          String?   @map("token_address")
+  /// Organization wallet being topped up. Authoritative – the webhook
+  /// handler ignores any orgBillingId echoed back in the provider
+  /// metadata.
+  orgBillingId          String?   @map("org_billing_id")
   failureReason         String?   @map("failure_reason")
   createdAt             DateTime  @default(now()) @map("created_at")
   updatedAt             DateTime  @updatedAt @map("updated_at")
@@ -479,6 +490,7 @@ model Payment {
 
   @@index([customerId])
   @@index([invoiceId])
+  @@index([orgBillingId])
   @@map("auth_payments")
 }
 
