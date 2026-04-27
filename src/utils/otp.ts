@@ -21,10 +21,10 @@ export function generateOTP(length: number = 6): string {
 
 /**
  * Generate a secure random nonce for SIWE challenges
- * @returns Base64-encoded nonce
+ * @returns URL-safe base64 nonce without padding
  */
 export function generateNonce(): string {
-  return randomBytes(32).toString('base64');
+  return randomBytes(32).toString('base64url');
 }
 
 /**

@@ -24,11 +24,12 @@ describe('OTP Utilities', () => {
   });
 
   describe('generateNonce', () => {
-    it('should generate base64 nonce', () => {
+    it('should generate URL-safe base64 nonce', () => {
       const nonce = generateNonce();
       expect(nonce).toBeTruthy();
       expect(typeof nonce).toBe('string');
       expect(nonce.length).toBeGreaterThan(0);
+      expect(/^[A-Za-z0-9_-]+$/.test(nonce)).toBe(true);
     });
 
     it('should generate unique nonces', () => {

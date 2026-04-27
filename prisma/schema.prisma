@@ -37,7 +37,9 @@ enum WhitelistRequestStatus {
 
 model AuthWhitelistRequest {
   id         String                 @id @default(uuid())
-  email      String                 @unique
+  email      String
+  identifier String                 @unique
+  identifierType String             @default("email") @map("identifier_type")
   name       String
   reason     String                 @db.Text
   status     WhitelistRequestStatus @default(PENDING)

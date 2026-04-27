@@ -2,7 +2,7 @@
  * WhitelistRequestService — self-service "let me in" requests.
  *
  * Flow:
- *   1. User hits the early-access gate at /auth/email/request, gets
+ *   1. User hits the early-access gate at email or wallet auth, gets
  *      a 403 from `whitelistService.check403`.
  *   2. The web-app shows a request form. Submit calls the public
  *      route which delegates to `create()` here.
@@ -14,8 +14,8 @@
  *      can now sign in) and marks the request APPROVED.
  *   5. The route layer triggers the approval email.
  *
- * Email is `@unique` so the same address can never have two open
- * requests; re-submits are a no-op.
+ * Identifier is `@unique` so the same email / wallet can never have
+ * two open requests; re-submits are a no-op.
  */
 
 import { PrismaClient, type AuthWhitelistRequest } from '@prisma/client';
@@ -42,22 +42,26 @@ class WhitelistRequestService {
    */
   async create(input: {
     email: string;
+    identifier?: string;
+    identifierType?: string;
     name: string;
     reason: string;
     ipAddress?: string;
     userAgent?: string;
   }): Promise<WhitelistRequestCreateResult> {
     const email = input.email.trim().toLowerCase();
+    const identifier = (input.identifier ?? email).trim().toLowerCase();
+    const identifierType = input.identifierType ?? 'email';
     const name = input.name.trim().slice(0, NAME_MAX);
     const reason = input.reason.trim().slice(0, REASON_MAX);
 
     // If they're already on the whitelist there's nothing to request.
-    if (await whitelistService.isWhitelisted(email)) {
+    if (await whitelistService.isWhitelisted(identifier)) {
       return { kind: 'already_whitelisted' };
     }
 
     const existing = await prisma.authWhitelistRequest.findUnique({
-      where: { email },
+      where: { identifier },
     });
     if (existing) {
       return { kind: 'already_requested', request: existing };
@@ -66,6 +70,8 @@ class WhitelistRequestService {
     const request = await prisma.authWhitelistRequest.create({
       data: {
         email,
+        identifier,
+        identifierType,
         name,
         reason,
         ipAddress: input.ipAddress,
@@ -95,7 +101,11 @@ class WhitelistRequestService {
     const request = await prisma.authWhitelistRequest.findUnique({ where: { id } });
     if (!request) return null;
 
-    await whitelistService.add(request.email, 'email', `Approved request ${request.id}`);
+    await whitelistService.add(
+      request.identifier,
+      request.identifierType,
+      `Approved request ${request.id} (${request.email})`,
+    );
 
     return prisma.authWhitelistRequest.update({
       where: { id },
