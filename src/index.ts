@@ -52,8 +52,8 @@ initializePaymentProviders({
 const app = new Hono();
 
 // Middleware
-// Phase 44/D2: trace middleware runs FIRST so every downstream handler,
-// db write, and audit() call sees the same trace id. Order matters:
+// Trace middleware runs FIRST so every downstream handler, db write,
+// and audit() call sees the same trace id. Order matters:
 // putting logger() before this one would give the logger a different id
 // from the one we echo to clients and record in audit events.
 app.use('*', traceMiddleware);

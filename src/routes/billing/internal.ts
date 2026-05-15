@@ -111,6 +111,12 @@ const notifySchema = z.object({
   dailyCostCents: z.number().int().optional(),
   pausedServices: z.array(z.string()).optional(),
   metadata: z.record(z.string(), z.unknown()).optional(),
+  // Optional dedupe key. When the caller (cloud-api scheduler, QStash
+  // retry, etc.) supplies a stable key, we INSERT into
+  // `organization_notification_log` first and skip the email send if the
+  // INSERT collides on the UNIQUE — gives at-least-once callers
+  // exactly-once email semantics.
+  idempotencyKey: z.string().min(1).optional(),
 });
 
 // ============================================
@@ -253,36 +259,44 @@ app.post('/compute-debit', async (c) => {
     const rawCostUsd = rawCostCents / 100;
     const chargedUsd = data.amountCents / 100;
 
-    // Debit balance
-    const debitResult = await dbService.debitOrgBalanceAtomic({
-      orgBillingId: data.orgBillingId,
-      actorUserId: data.userId,
-      amountCents: data.amountCents,
-      reason: data.serviceType,
-      idempotencyKey: data.idempotencyKey,
-      metadata: {
-        serviceType: data.serviceType,
-        provider: data.provider,
-        resource: data.resource,
-        description: data.description,
-        ...data.metadata,
-      },
-    });
-
-    // Log usage (user-visible + internal audit)
-    if (!debitResult.alreadyProcessed) {
-      await dbService.logOrgUsage({
+    // Debit + usage-log MUST run in one transaction. Previously the two
+    // steps were sequential top-level calls: if the usage-log write failed
+    // (or the process crashed between them), the wallet was charged with
+    // no audit row — invisible from the user dashboard, breaks reconcile.
+    const debitResult = await dbService.prismaClient.$transaction(async (tx) => {
+      const debit = await dbService.debitOrgBalanceAtomic({
         orgBillingId: data.orgBillingId,
-        userId: data.userId || 'system',
-        serviceType: data.serviceType,
-        provider: data.provider,
-        resource: data.resource,
-        usdCostRaw: rawCostUsd,
-        marginRate,
-        usdCharged: chargedUsd,
-        metadata: data.metadata,
+        actorUserId: data.userId,
+        amountCents: data.amountCents,
+        reason: data.serviceType,
+        idempotencyKey: data.idempotencyKey,
+        metadata: {
+          serviceType: data.serviceType,
+          provider: data.provider,
+          resource: data.resource,
+          description: data.description,
+          ...data.metadata,
+        },
+        tx,
       });
-    }
+
+      if (!debit.alreadyProcessed) {
+        await dbService.logOrgUsage({
+          orgBillingId: data.orgBillingId,
+          userId: data.userId || 'system',
+          serviceType: data.serviceType,
+          provider: data.provider,
+          resource: data.resource,
+          usdCostRaw: rawCostUsd,
+          marginRate,
+          usdCharged: chargedUsd,
+          metadata: data.metadata,
+          tx,
+        });
+      }
+
+      return debit;
+    });
 
     return c.json({
       success: true,
@@ -457,6 +471,51 @@ app.post('/notify', async (c) => {
   try {
     const body = await c.req.json();
     const data = notifySchema.parse(body);
+
+    // Idempotency dedupe. Insert the log row first; on UNIQUE collision
+    // (P2002 on `idempotency_key`) treat as "already sent" and skip the
+    // Resend call. We resolve `orgBillingId` lazily because the caller
+    // only knows `orgId`; failing the lookup is non-fatal — it just
+    // leaves the log row with `orgBillingId=null`.
+    let resolvedOrgBillingId: string | null = null;
+    if (data.idempotencyKey) {
+      try {
+        const orgBilling = await dbService.getOrganizationBillingByOrgId(data.orgId);
+        resolvedOrgBillingId = orgBilling?.id ?? null;
+      } catch {
+        /* swallow — best-effort lookup */
+      }
+
+      try {
+        await dbService.prismaClient.organizationNotificationLog.create({
+          data: {
+            idempotencyKey: data.idempotencyKey,
+            orgBillingId: resolvedOrgBillingId,
+            type: data.type,
+            recipientEmail: data.email || null,
+            metadata: {
+              orgId: data.orgId,
+              orgName: data.orgName,
+              balanceCents: data.balanceCents,
+              dailyCostCents: data.dailyCostCents,
+              pausedServicesCount: data.pausedServices?.length ?? 0,
+            } as object,
+          },
+        });
+      } catch (err) {
+        if (
+          err instanceof Error &&
+          'code' in err &&
+          (err as { code?: string }).code === 'P2002'
+        ) {
+          console.info(
+            `[Internal Billing] notify dedupe hit type=${data.type} orgId=${data.orgId} key=${data.idempotencyKey}`,
+          );
+          return c.json({ success: true, type: data.type, alreadyProcessed: true });
+        }
+        throw err;
+      }
+    }
 
     const emailService = new EmailService();
 

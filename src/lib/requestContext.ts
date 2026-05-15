@@ -1,5 +1,5 @@
 /**
- * Per-request storage for service-auth (Phase 44 / D2).
+ * Per-request storage for service-auth.
  *
  * Mirrors `service-cloud-api/src/lib/requestContext.ts` in shape so
  * both services agree on what `currentTraceId()` returns. Populated by

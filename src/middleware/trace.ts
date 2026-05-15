@@ -1,5 +1,5 @@
 /**
- * Trace middleware (Phase 44 / D2).
+ * Trace middleware.
  *
  * Runs first on every request so every downstream handler, db call,
  * audit() write, and internal fetch sees the same trace id.

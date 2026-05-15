@@ -447,38 +447,48 @@ export async function processUsage(args: {
   // Generate idempotency key for debit
   const idempotencyKey = `usage:${orgBillingId}:${requestId || nanoid()}`;
 
-  // Debit balance atomically (in cents)
-  const debitResult = await dbService.debitOrgBalanceAtomic({
-    orgBillingId,
-    actorUserId: userId,
-    amountCents,
-    reason: serviceType,
-    idempotencyKey,
-    metadata: {
-      serviceType,
-      provider,
-      resource,
-      model,
-      usdCostRaw,
-      usdCharged,
-      marginRate,
-      ...metadata,
-    },
-  });
+  // Debit + usage-log MUST share a transaction. Previously the two ran
+  // sequentially and a usage-log failure (or a process crash between
+  // them) left the wallet charged with no audit row — undetectable from
+  // the user dashboard.
+  const debitResult = await dbService.prismaClient.$transaction(async (tx) => {
+    const debit = await dbService.debitOrgBalanceAtomic({
+      orgBillingId,
+      actorUserId: userId,
+      amountCents,
+      reason: serviceType,
+      idempotencyKey,
+      metadata: {
+        serviceType,
+        provider,
+        resource,
+        model,
+        usdCostRaw,
+        usdCharged,
+        marginRate,
+        ...metadata,
+      },
+      tx,
+    });
 
-  // Log usage (in USD)
-  await dbService.logOrgUsage({
-    orgBillingId,
-    userId,
-    serviceType,
-    provider,
-    resource,
-    model,
-    usdCostRaw,
-    marginRate,
-    usdCharged,
-    requestId,
-    metadata,
+    if (!debit.alreadyProcessed) {
+      await dbService.logOrgUsage({
+        orgBillingId,
+        userId,
+        serviceType,
+        provider,
+        resource,
+        model,
+        usdCostRaw,
+        marginRate,
+        usdCharged,
+        requestId,
+        metadata,
+        tx,
+      });
+    }
+
+    return debit;
   });
 
   // Beta-grade observability for AI proxy traffic. Every settled
