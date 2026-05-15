@@ -184,7 +184,7 @@ app.post('/verify', strictRateLimit, async (c) => {
         return c.json({ error: 'Account setup failed. Please try again.' }, 500);
       }
 
-      // Phase 44 audit: first touch for the new user. orgId is fetched
+      // First-touch audit event for the new user. orgId is fetched
       // separately in the token step below; we log without it here so a
       // failure in org lookup never swallows the signup audit row.
       audit(dbService.prismaClient, {

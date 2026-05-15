@@ -5,8 +5,20 @@
  * SECURITY: Sensitive tokens (refresh tokens, etc.) are hashed before storage
  */
 
-import { PrismaClient } from '@prisma/client';
+import { Prisma, PrismaClient } from '@prisma/client';
 import { createHash, timingSafeEqual } from 'node:crypto';
+
+/**
+ * Postgres unique-constraint violation. Centralizing the check keeps the
+ * Prisma error-code knowledge inside this module so callers don't have to
+ * pattern-match raw error codes from the client.
+ */
+function isUniqueConstraintError(err: unknown): err is Prisma.PrismaClientKnownRequestError {
+  return (
+    err instanceof Prisma.PrismaClientKnownRequestError &&
+    err.code === 'P2002'
+  );
+}
 
 /**
  * Default amount of compute credit (in USD cents) seeded into a new
@@ -3474,48 +3486,47 @@ export class DatabaseService {
   }): Promise<{ balanceCents: number; alreadyProcessed: boolean }> {
     const { orgBillingId, actorUserId, amountCents, reason, idempotencyKey, metadata = {} } = args;
 
-    // Check if idempotency key already exists
-    const existingLedger = await this.prisma.organizationUsageLedger.findUnique({
-      where: { idempotencyKey },
-    });
+    // Race-safe idempotency: rely on the `idempotency_key` UNIQUE
+    // constraint inside the transaction instead of a pre-check `findUnique`
+    // outside it. The pre-check pattern leaves a window where two concurrent
+    // callers both miss, both enter the tx, and the second one throws P2002
+    // → 500. Catching P2002 here returns "already processed" cleanly.
+    try {
+      const result = await this.prisma.$transaction(async (tx) => {
+        await tx.organizationUsageLedger.create({
+          data: {
+            orgBillingId,
+            actorUserId: actorUserId ?? null,
+            direction: 'CREDIT',
+            amountCents,
+            reason,
+            idempotencyKey,
+            metadata: metadata as object,
+          },
+        });
 
-    if (existingLedger) {
-      // Already processed - return current balance
-      const balance = await this.getOrCreateOrgUsageBalance(orgBillingId);
-      return { balanceCents: balance.balance_cents, alreadyProcessed: true };
+        const updatedBalance = await tx.organizationUsageBalance.upsert({
+          where: { orgBillingId },
+          create: {
+            orgBillingId,
+            balanceCents: amountCents,
+          },
+          update: {
+            balanceCents: { increment: amountCents },
+          },
+        });
+
+        return updatedBalance.balanceCents;
+      });
+
+      return { balanceCents: result, alreadyProcessed: false };
+    } catch (err) {
+      if (isUniqueConstraintError(err)) {
+        const balance = await this.getOrCreateOrgUsageBalance(orgBillingId);
+        return { balanceCents: balance.balance_cents, alreadyProcessed: true };
+      }
+      throw err;
     }
-
-    // Use transaction to ensure atomicity
-    const result = await this.prisma.$transaction(async (tx) => {
-      // Insert ledger entry
-      await tx.organizationUsageLedger.create({
-        data: {
-          orgBillingId,
-          actorUserId: actorUserId ?? null,
-          direction: 'CREDIT',
-          amountCents,
-          reason,
-          idempotencyKey,
-          metadata: metadata as object,
-        },
-      });
-
-      // Upsert balance (create if not exists, otherwise increment)
-      const updatedBalance = await tx.organizationUsageBalance.upsert({
-        where: { orgBillingId },
-        create: {
-          orgBillingId,
-          balanceCents: amountCents,
-        },
-        update: {
-          balanceCents: { increment: amountCents },
-        },
-      });
-
-      return updatedBalance.balanceCents;
-    });
-
-    return { balanceCents: result, alreadyProcessed: false };
   }
 
   /**
@@ -3530,23 +3541,20 @@ export class DatabaseService {
     reason: string;
     idempotencyKey: string;
     metadata?: Record<string, unknown>;
+    /**
+     * Optional transaction client. When provided, the debit + ledger insert
+     * run inside the caller's transaction (used by `compute-debit` to keep
+     * debit + usage-log atomic). When omitted, opens its own transaction.
+     */
+    tx?: Prisma.TransactionClient;
   }): Promise<{ balanceCents: number; alreadyProcessed: boolean }> {
-    const { orgBillingId, actorUserId, amountCents, reason, idempotencyKey, metadata = {} } = args;
+    const { orgBillingId, actorUserId, amountCents, reason, idempotencyKey, metadata = {}, tx: outerTx } = args;
 
-    // Check if idempotency key already exists
-    const existingLedger = await this.prisma.organizationUsageLedger.findUnique({
-      where: { idempotencyKey },
-    });
-
-    if (existingLedger) {
-      // Already processed - return current balance
-      const balance = await this.getOrCreateOrgUsageBalance(orgBillingId);
-      return { balanceCents: balance.balance_cents, alreadyProcessed: true };
-    }
-
-    // Use transaction to ensure atomicity with guard
-    const result = await this.prisma.$transaction(async (tx) => {
-      // Insert ledger entry first
+    // Race-safe idempotency: P2002 on `idempotency_key` is the dedupe
+    // primitive. The previous `findUnique` pre-check left a TOCTOU race
+    // where two concurrent callers each saw "not found" and the second
+    // one's tx threw an unhandled P2002 → 500.
+    const runDebit = async (tx: Prisma.TransactionClient): Promise<number> => {
       await tx.organizationUsageLedger.create({
         data: {
           orgBillingId,
@@ -3559,7 +3567,8 @@ export class DatabaseService {
         },
       });
 
-      // Update balance with guard (balance >= amount)
+      // Conditional decrement: rejects if balance < amount. Guards against
+      // the read-then-write race a `findUnique` + `update` pair would have.
       const updateResult = await tx.organizationUsageBalance.updateMany({
         where: {
           orgBillingId,
@@ -3571,19 +3580,28 @@ export class DatabaseService {
       });
 
       if (updateResult.count === 0) {
-        // Guard failed - insufficient balance or balance row missing
         throw new Error('INSUFFICIENT_BALANCE');
       }
 
-      // Get updated balance
       const updatedBalance = await tx.organizationUsageBalance.findUnique({
         where: { orgBillingId },
       });
 
       return updatedBalance!.balanceCents;
-    });
+    };
 
-    return { balanceCents: result, alreadyProcessed: false };
+    try {
+      const balanceCents = outerTx
+        ? await runDebit(outerTx)
+        : await this.prisma.$transaction(runDebit);
+      return { balanceCents, alreadyProcessed: false };
+    } catch (err) {
+      if (isUniqueConstraintError(err)) {
+        const balance = await this.getOrCreateOrgUsageBalance(orgBillingId);
+        return { balanceCents: balance.balance_cents, alreadyProcessed: true };
+      }
+      throw err;
+    }
   }
 
   /**
@@ -3602,6 +3620,13 @@ export class DatabaseService {
     usdCharged: number; // final amount charged = usdCostRaw / (1 - marginRate)
     requestId?: string;
     metadata?: Record<string, unknown>;
+    /**
+     * Optional transaction client. Lets `compute-debit` and other callers
+     * compose `debitOrgBalanceAtomic` + `logOrgUsage` inside one outer
+     * transaction so a failed log won't leave the wallet charged with no
+     * audit row (and vice versa).
+     */
+    tx?: Prisma.TransactionClient;
   }): Promise<{ usageId: string; costsPrivateId: string }> {
     const {
       orgBillingId,
@@ -3615,17 +3640,14 @@ export class DatabaseService {
       usdCharged,
       requestId,
       metadata = {},
+      tx: outerTx,
     } = args;
 
-    // Calculate margin earned
     const marginUsd = usdCharged - usdCostRaw;
 
-    // Create both records in a transaction
-    const result = await this.prisma.$transaction(async (tx) => {
-      // Resolve userId: null/undefined/'system' → null (for system-initiated debits)
+    const writeBoth = async (tx: Prisma.TransactionClient) => {
       const resolvedUserId = (userId && userId !== 'system') ? userId : null;
 
-      // User-visible usage log
       const usage = await tx.organizationUsageLog.create({
         data: {
           orgBillingId,
@@ -3642,7 +3664,6 @@ export class DatabaseService {
         },
       });
 
-      // Internal audit log
       const costsPrivate = await tx.organizationUsageCostsPrivate.create({
         data: {
           orgBillingId,
@@ -3660,9 +3681,11 @@ export class DatabaseService {
       });
 
       return { usageId: usage.id, costsPrivateId: costsPrivate.id };
-    });
+    };
 
-    return result;
+    return outerTx
+      ? writeBoth(outerTx)
+      : this.prisma.$transaction(writeBoth);
   }
 
   /**
@@ -3682,20 +3705,28 @@ export class DatabaseService {
     requestId: string;
     metadata?: Record<string, unknown>;
   }): Promise<{ usageId: string; alreadyProcessed: boolean }> {
-    const existing = await this.prisma.organizationUsageLog.findFirst({
-      where: {
-        orgBillingId: args.orgBillingId,
-        requestId: args.requestId,
-      },
-      select: { id: true },
-    });
-
-    if (existing) {
-      return { usageId: existing.id, alreadyProcessed: true };
+    // Race-safe via the partial UNIQUE on (org_billing_id, request_id)
+    // created in `20260515132535_billing_idempotency_constraints`. The
+    // previous TOCTOU `findFirst` → `create` pattern produced duplicate
+    // rows under concurrent retries with the same `requestId`.
+    try {
+      const result = await this.logOrgUsage(args);
+      return { usageId: result.usageId, alreadyProcessed: false };
+    } catch (err) {
+      if (isUniqueConstraintError(err)) {
+        const existing = await this.prisma.organizationUsageLog.findFirst({
+          where: {
+            orgBillingId: args.orgBillingId,
+            requestId: args.requestId,
+          },
+          select: { id: true },
+        });
+        if (existing) {
+          return { usageId: existing.id, alreadyProcessed: true };
+        }
+      }
+      throw err;
     }
-
-    const result = await this.logOrgUsage(args);
-    return { usageId: result.usageId, alreadyProcessed: false };
   }
 
   /**

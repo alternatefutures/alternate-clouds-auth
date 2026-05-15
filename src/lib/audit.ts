@@ -1,5 +1,5 @@
 /**
- * Audit Log Writer (Phase 44 / D1) — service-auth copy.
+ * Audit Log Writer — service-auth copy.
  *
  * Identity + billing events land here. An identical helper lives at
  * `service-cloud-api/src/lib/audit.ts` for deployment / health / provider

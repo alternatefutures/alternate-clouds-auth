@@ -1,5 +1,5 @@
 /**
- * Internal Audit Range API (Phase 44 / D3a)
+ * Internal Audit Range API
  *
  * Service-to-service endpoint that streams the auth half of the audit
  * log for a closed time range. Consumed by the cloud-api JSONL exporter

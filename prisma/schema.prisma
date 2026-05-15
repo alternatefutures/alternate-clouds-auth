@@ -696,7 +696,33 @@ model OrganizationUsageLog {
   @@index([userId, createdAt])
   @@index([serviceType])
   @@index([provider])
+  // Partial UNIQUE on (orgBillingId, requestId) WHERE request_id IS NOT NULL
+  // is created via a raw SQL migration (Prisma can't express partial uniques
+  // declaratively). It's the dedupe primitive for `logOrgUsageIdempotent`,
+  // which previously used a TOCTOU `findFirst` → `create` with no DB-level
+  // guarantee, so concurrent retries with the same `requestId` produced
+  // duplicate rows.
   @@map("organization_usage_log")
+}
+
+/**
+ * Idempotency log for the `/internal/billing/notify` endpoint. Without this
+ * table, a cloud-api retry (or any QStash-backed caller with at-least-once
+ * semantics) sends a duplicate email per attempt. Callers pass a stable
+ * `idempotencyKey`; the INSERT inside the route returns "already sent" on
+ * P2002 instead of re-firing Resend.
+ */
+model OrganizationNotificationLog {
+  id              String   @id @default(uuid())
+  idempotencyKey  String   @unique @map("idempotency_key")
+  orgBillingId    String?  @map("org_billing_id")
+  type            String   @map("type") // low_balance_pause, low_balance_warning, escrow_depleted, ...
+  recipientEmail  String?  @map("recipient_email")
+  metadata        Json     @default("{}") @map("metadata")
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  @@index([orgBillingId, createdAt(sort: Desc)])
+  @@map("organization_notification_log")
 }
 
 model OrganizationUsageCostsPrivate {
@@ -725,7 +751,7 @@ model OrganizationUsageCostsPrivate {
 }
 
 // ============================================
-// AUDIT LOG (Phase 44)
+// AUDIT LOG
 // ============================================
 // Identity + billing half of the platform audit log. An identical model
 // lives in service-cloud-api for deployment / health / provider events.
