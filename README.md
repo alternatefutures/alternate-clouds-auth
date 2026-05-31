@@ -102,8 +102,8 @@ See `.env.example` for the full list. Key variables:
 ## Related
 
 - [service-cloud-api](https://github.com/alternatefutures/service-cloud-api) — GraphQL API
-- [web-app](https://github.com/alternatefutures/web-app.alternatefutures.ai) — Dashboard
-- [package-cloud-cli](https://github.com/alternatefutures/package-cloud-cli) — CLI
+- [web-app](https://github.com/alternatefutures/alternate-clouds-web-app) — Dashboard
+- [alternate-clouds-cli](https://github.com/alternatefutures/alternate-clouds-cli) — CLI
 
 ---
 
