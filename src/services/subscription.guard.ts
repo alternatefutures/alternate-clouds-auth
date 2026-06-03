@@ -57,7 +57,14 @@ export async function subscriptionGuard(c: Context, next: Next) {
   const user = getAuthUser(c);
   if (!user) return next();
 
+  // Only enforce against the EXPLICIT org context. Without an
+  // X-Organization-Id header we must NOT guess the user's first org —
+  // that could 403 a team member on the basis of their unrelated personal
+  // org. Downstream routes (e.g. AI) already 400 when the header is missing,
+  // so passing through here is safe and avoids wrong-org blocks.
   const orgId = c.req.header('X-Organization-Id') || undefined;
+  if (!orgId) return next();
+
   const status = await getUserSubscriptionStatus(user.userId, orgId);
 
   if (status?.status) {

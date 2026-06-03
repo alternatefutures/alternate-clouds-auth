@@ -11,6 +11,7 @@ import { auditLogService } from '../../services/auditLog.service';
 import { audit } from '../../lib/audit';
 import { notifyNewSignup } from '../../lib/discordNotifier';
 import { generateDeviceFingerprint } from '../../utils/fingerprint';
+import { reconcilePendingInvites } from '../../services/invites.service';
 
 const app = new Hono();
 
@@ -291,6 +292,16 @@ app.get('/callback/:provider', async (c) => {
         method: `OAuth (${provider})`,
         createdAt: new Date(),
       });
+    }
+
+    // Auto-join any pending team invitations addressed to this email.
+    if (user.email) {
+      try {
+        const joined = await reconcilePendingInvites(user.id, user.email);
+        if (joined > 0) console.log(`[invites] ${user.id} auto-joined ${joined} org(s) on OAuth login`);
+      } catch (inviteErr) {
+        console.error('[invites] reconcile on OAuth login failed (non-fatal):', inviteErr);
+      }
     }
 
     // Generate JWT tokens

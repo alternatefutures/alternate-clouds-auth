@@ -21,6 +21,8 @@ import type {
   CreateRefundInput,
   CreateCheckoutSessionInput,
   CheckoutSession,
+  PreviewSubscriptionChangeInput,
+  SubscriptionChangePreview,
   WebhookEvent,
   ConnectedAccount,
   CreateConnectedAccountInput,
@@ -301,20 +303,73 @@ export class StripeProvider implements PaymentProvider {
   async updateSubscription(subscriptionId: string, input: Partial<CreateSubscriptionInput>): Promise<ExternalSubscription> {
     const updateParams: Stripe.SubscriptionUpdateParams = {};
 
-    if (input.quantity !== undefined) {
+    // Seat (quantity) and/or plan (price) changes both edit the single subscription item.
+    if (input.quantity !== undefined || input.priceId) {
       const subscription = await this.stripe.subscriptions.retrieve(subscriptionId);
-      updateParams.items = [{
+      const item: Stripe.SubscriptionUpdateParams.Item = {
         id: subscription.items.data[0].id,
-        quantity: input.quantity,
-      }];
+      };
+      if (input.quantity !== undefined) item.quantity = input.quantity;
+      if (input.priceId) item.price = input.priceId;
+      updateParams.items = [item];
     }
 
     if (input.metadata) {
       updateParams.metadata = input.metadata;
     }
 
+    // Default Stripe behavior is `create_prorations` (deferred to next invoice).
+    // Per-seat billing passes `always_invoice` so the card is charged NOW for the
+    // prorated delta — critical on YEARLY where the next invoice is ~12 months out.
+    if (input.prorationBehavior) {
+      updateParams.proration_behavior = input.prorationBehavior;
+    }
+
+    // Plan switches reset the billing cycle to the switch date so the new
+    // interval (month/year) starts today rather than the old anchor.
+    if (input.billingCycleAnchorNow) {
+      updateParams.billing_cycle_anchor = 'now';
+    }
+
     const subscription = await this.stripe.subscriptions.update(subscriptionId, updateParams);
     return this.mapSubscription(subscription);
+  }
+
+  /**
+   * Preview the immediate invoice that a seat or plan change would produce,
+   * without applying it. Used by the UI to show "you'll be charged $X now" or
+   * "you'll receive $Y credit". A negative ending balance is a customer-balance
+   * credit (e.g. annual→monthly downgrade) that Stripe auto-applies to future
+   * subscription invoices.
+   */
+  async previewSubscriptionChange(input: PreviewSubscriptionChangeInput): Promise<SubscriptionChangePreview> {
+    const subscription = await this.stripe.subscriptions.retrieve(input.subscriptionId);
+    const customerId = typeof subscription.customer === 'string'
+      ? subscription.customer
+      : subscription.customer.id;
+
+    const item: Stripe.InvoiceCreatePreviewParams.SubscriptionDetails.Item = {
+      id: subscription.items.data[0].id,
+    };
+    if (input.quantity !== undefined) item.quantity = input.quantity;
+    if (input.priceId) item.price = input.priceId;
+
+    const preview = await this.stripe.invoices.createPreview({
+      customer: customerId,
+      subscription: input.subscriptionId,
+      subscription_details: {
+        items: [item],
+        proration_behavior: input.prorationBehavior ?? 'always_invoice',
+        ...(input.resetBillingAnchor ? { billing_cycle_anchor: 'now' } : {}),
+      },
+    });
+
+    return {
+      amountDueCents: preview.amount_due,
+      currency: preview.currency,
+      startingBalanceCents: preview.starting_balance ?? 0,
+      endingBalanceCents: preview.ending_balance ?? 0,
+    };
   }
 
   async cancelSubscription(subscriptionId: string, input?: CancelSubscriptionInput): Promise<ExternalSubscription> {

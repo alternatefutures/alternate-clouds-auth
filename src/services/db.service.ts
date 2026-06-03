@@ -481,8 +481,10 @@ export interface OrganizationUsageCostsPrivate {
   created_at: number;
 }
 
-// Default usage margin rate — used as fallback when org has no active subscription.
-// Per-plan markup (from SubscriptionPlan.usageMarkup) is preferred; see costMetering.ts.
+// Default usage markup rate — used as fallback when org has no active subscription.
+// We apply a markup (charged = raw × (1 + rate)), not a true margin. Per-plan
+// markup (from SubscriptionPlan.usageMarkup) is preferred; see costMetering.ts.
+// Env var name kept as USAGE_MARGIN_RATE for deployment/config compatibility.
 export const USAGE_MARGIN_RATE = parseFloat(process.env.USAGE_MARGIN_RATE || '0.25'); // 25% default
 
 // ============================================
@@ -1980,6 +1982,16 @@ export class DatabaseService {
 
   async getSubscriptionPlanById(id: string): Promise<SubscriptionPlan | null> {
     const result = await this.prisma.subscriptionPlan.findUnique({ where: { id } });
+    if (!result) return null;
+    return this.serializePlan(result);
+  }
+
+  /**
+   * Resolve a plan from its Stripe price id. Used by the subscription webhook to
+   * reconcile a plan switch made on the Stripe side back to our `plan_id`.
+   */
+  async getSubscriptionPlanByStripePriceId(stripePriceId: string): Promise<SubscriptionPlan | null> {
+    const result = await this.prisma.subscriptionPlan.findFirst({ where: { stripePriceId } });
     if (!result) return null;
     return this.serializePlan(result);
   }
@@ -3616,8 +3628,8 @@ export class DatabaseService {
     resource: string;
     model?: string;
     usdCostRaw: number; // raw provider cost
-    marginRate: number; // e.g., 0.5 = 50%
-    usdCharged: number; // final amount charged = usdCostRaw / (1 - marginRate)
+    marginRate: number; // markup rate as a decimal, e.g. 0.25 = 25% (param name kept for DB/contract compat)
+    usdCharged: number; // final amount charged = usdCostRaw × (1 + markupRate)
     requestId?: string;
     metadata?: Record<string, unknown>;
     /**

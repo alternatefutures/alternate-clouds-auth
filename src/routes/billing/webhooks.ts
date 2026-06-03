@@ -300,12 +300,34 @@ async function processStripeEvent(event: WebhookEvent): Promise<void> {
         const cancelAt = data.cancel_at as number | undefined;
         const canceledAt = data.canceled_at as number | undefined;
 
+        // Reconcile seats from Stripe's authoritative item quantity (Stripe is
+        // the source of truth for billed seats). Guards against drift when seat
+        // changes originate outside our API (dashboard edits, proration, etc.).
+        const item = (data.items as { data?: Array<{ quantity?: number; price?: { id?: string } }> } | undefined)
+          ?.data?.[0];
+        const itemQuantity = item?.quantity;
+
+        // Reconcile the plan from Stripe's authoritative item price (handles plan
+        // switches — monthly↔annual — whether triggered by our change-plan endpoint
+        // or directly in the Stripe dashboard). Period start/end above already
+        // reflect the new interval.
+        let reconciledPlanId: string | undefined;
+        const itemPriceId = item?.price?.id;
+        if (itemPriceId) {
+          const matchedPlan = await dbService.getSubscriptionPlanByStripePriceId(itemPriceId);
+          if (matchedPlan && matchedPlan.id !== subscription.plan_id) {
+            reconciledPlanId = matchedPlan.id;
+          }
+        }
+
         const updates: Record<string, unknown> = {
           status: mappedStatus,
           current_period_start: periodStart ? periodStart * 1000 : undefined,
           current_period_end: periodEnd ? periodEnd * 1000 : undefined,
           cancel_at: cancelAt ? cancelAt * 1000 : undefined,
           canceled_at: canceledAt ? canceledAt * 1000 : undefined,
+          ...(typeof itemQuantity === 'number' && itemQuantity > 0 ? { seats: itemQuantity } : {}),
+          ...(reconciledPlanId ? { plan_id: reconciledPlanId } : {}),
         };
 
         // When payment is confirmed (incomplete→active) or trial ends and first charge

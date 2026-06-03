@@ -237,6 +237,13 @@ enum OrgRole {
   MEMBER
 }
 
+enum InvitationStatus {
+  PENDING
+  ACCEPTED
+  REVOKED
+  EXPIRED
+}
+
 model Organization {
   id        String   @id @default(uuid())
   slug      String   @unique
@@ -246,6 +253,7 @@ model Organization {
   updatedAt DateTime @updatedAt @map("updated_at")
 
   members              OrganizationMember[]
+  invitations          OrganizationInvitation[]
   billing              OrganizationBilling?
   personalAccessTokens PersonalAccessToken[]
 
@@ -266,6 +274,28 @@ model OrganizationMember {
   @@index([organizationId])
   @@index([userId])
   @@map("organization_members")
+}
+
+model OrganizationInvitation {
+  id               String           @id @default(uuid())
+  organizationId   String           @map("organization_id")
+  email            String // normalized lower-case
+  role             OrgRole          @default(MEMBER) // ADMIN | MEMBER (never OWNER)
+  status           InvitationStatus @default(PENDING)
+  tokenHash        String           @unique @map("token_hash") // sha256(raw token); raw emailed once
+  invitedByUserId  String           @map("invited_by_user_id")
+  expiresAt        DateTime         @map("expires_at")
+  acceptedAt       DateTime?        @map("accepted_at")
+  acceptedByUserId String?          @map("accepted_by_user_id")
+  createdAt        DateTime         @default(now()) @map("created_at")
+  updatedAt        DateTime         @updatedAt @map("updated_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, email])
+  @@index([email])
+  @@index([organizationId])
+  @@map("organization_invitations")
 }
 
 model OrganizationBilling {
