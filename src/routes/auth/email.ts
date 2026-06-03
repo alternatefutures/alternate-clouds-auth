@@ -14,6 +14,7 @@ import { auditLogService } from '../../services/auditLog.service';
 import { audit } from '../../lib/audit';
 import { notifyNewSignup } from '../../lib/discordNotifier';
 import { generateDeviceFingerprint } from '../../utils/fingerprint';
+import { reconcilePendingInvites } from '../../services/invites.service';
 
 const app = new Hono();
 
@@ -235,6 +236,14 @@ app.post('/verify', strictRateLimit, async (c) => {
           return c.json({ error: 'Account setup failed. Please try again.' }, 500);
         }
       }
+    }
+
+    // Auto-join any pending team invitations addressed to this email.
+    try {
+      const joined = await reconcilePendingInvites(user.id, email);
+      if (joined > 0) console.log(`[invites] ${user.id} auto-joined ${joined} org(s) on email login`);
+    } catch (inviteErr) {
+      console.error('[invites] reconcile on email login failed (non-fatal):', inviteErr);
     }
 
     // Generate JWT tokens

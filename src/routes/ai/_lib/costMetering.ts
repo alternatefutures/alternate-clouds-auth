@@ -28,7 +28,7 @@ export interface UsageInfo {
 
 export interface UsageProcessingResult {
   usdCostRaw: number; // Raw provider cost
-  usdCharged: number; // Amount charged to user (with margin)
+  usdCharged: number; // Amount charged to user (raw cost with markup applied)
   newBalanceCents: number; // Remaining balance in cents
 }
 

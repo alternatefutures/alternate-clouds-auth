@@ -149,6 +149,32 @@ export interface CreateSubscriptionInput {
   // Connect specific
   connectedAccountId?: string;
   applicationFeePercent?: number; // Platform takes this % of each invoice
+  // Update-only controls (ignored on create)
+  prorationBehavior?: ProrationBehavior; // how Stripe handles mid-cycle changes
+  billingCycleAnchorNow?: boolean; // reset the billing cycle to the change date
+}
+
+/**
+ * Stripe proration_behavior values.
+ *   - `always_invoice`: invoice + charge the card immediately for the prorated delta.
+ *   - `create_prorations`: defer the prorated charge/credit to the next invoice.
+ *   - `none`: no proration line items.
+ */
+export type ProrationBehavior = 'always_invoice' | 'create_prorations' | 'none';
+
+export interface PreviewSubscriptionChangeInput {
+  subscriptionId: string;
+  priceId?: string; // new price (plan switch) — omit to keep current price
+  quantity?: number; // new seat count — omit to keep current quantity
+  prorationBehavior?: ProrationBehavior; // defaults to always_invoice
+  resetBillingAnchor?: boolean; // preview as if the cycle resets to now
+}
+
+export interface SubscriptionChangePreview {
+  amountDueCents: number; // positive = charge now; can be 0 when credit absorbs it
+  currency: string;
+  startingBalanceCents: number; // customer balance before this change (negative = credit)
+  endingBalanceCents: number; // customer balance after this change (negative = credit)
 }
 
 // Transfer types for Connect payouts
@@ -239,6 +265,7 @@ export interface PaymentProvider {
   getSubscription?(subscriptionId: string): Promise<ExternalSubscription | null>;
   updateSubscription?(subscriptionId: string, input: Partial<CreateSubscriptionInput>): Promise<ExternalSubscription>;
   cancelSubscription?(subscriptionId: string, input?: CancelSubscriptionInput): Promise<ExternalSubscription>;
+  previewSubscriptionChange?(input: PreviewSubscriptionChangeInput): Promise<SubscriptionChangePreview>;
 
   // Invoices (optional)
   getInvoice?(invoiceId: string): Promise<ExternalInvoice | null>;

@@ -10,7 +10,13 @@ const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY || '';
  *
  * Pricing model:
  *   - Monthly: $25/seat/month, 25% markup on usage
- *   - Yearly:  $20/seat/month ($240/year), 20% markup on usage
+ *   - Yearly:  $240/seat/year (= $20/seat/month equivalent), 20% markup on usage
+ *
+ * IMPORTANT: `basePricePerSeat` stores the TRUE per-period line-item amount that
+ * matches the Stripe price — MONTHLY = 2500 ($25/mo), YEARLY = 24000 ($240/yr).
+ * Storing the monthly-equivalent ($20) for YEARLY made seat-proback previews
+ * understate the yearly seat proration ~12×. Display layers divide by 12 to show a
+ * monthly-equivalent. (Fixed 2026-06-03, decision #11 / §9.3.)
  *
  * Usage (AI inference, compute, storage, bandwidth) is billed from the
  * prepaid credits wallet. The markup is applied on top of raw provider cost:
@@ -35,7 +41,7 @@ const subscriptionPlans = [
   },
   {
     name: 'YEARLY',
-    basePricePerSeat: 2000,
+    basePricePerSeat: 24000, // $240/seat/year — TRUE annual amount, matches Stripe unit_amount
     usageMarkup: 0.20,
     billingInterval: 'YEARLY',
     isActive: true,
@@ -167,10 +173,11 @@ async function seed() {
   for (const plan of plans) {
     const status = plan.isActive ? 'ACTIVE' : 'INACTIVE';
     const price = plan.basePricePerSeat / 100;
+    const perSeatUnit = plan.billingInterval === 'YEARLY' ? 'seat/year' : 'seat/month';
     const markup = Math.round(plan.usageMarkup * 100);
     const stripe = plan.stripePriceId ? ` stripe:${plan.stripePriceId}` : ' (no stripe price)';
     console.log(
-      `  [${status}] ${plan.name}: $${price}/seat/month, ${markup}% usage markup, billed ${plan.billingInterval}${stripe}`
+      `  [${status}] ${plan.name}: $${price}/${perSeatUnit}, ${markup}% usage markup, billed ${plan.billingInterval}${stripe}`
     );
   }
 }

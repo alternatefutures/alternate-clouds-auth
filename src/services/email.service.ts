@@ -319,6 +319,57 @@ export class EmailService {
       html,
     });
   }
+
+  /**
+   * Send an organization team invitation with an accept link.
+   * The accept link contains a one-time raw token (hashed at rest).
+   */
+  async sendOrgInvite(
+    email: string,
+    orgName: string,
+    inviterName: string,
+    role: string,
+    acceptUrl: string,
+  ): Promise<void> {
+    if (!this.apiKey || process.env.NODE_ENV === 'development') {
+      console.log('\n👥 ========================================');
+      console.log('📧 ORG INVITE (Development Mode)');
+      console.log('========================================');
+      console.log(`Email: ${email}`);
+      console.log(`Org: ${orgName} | Role: ${role}`);
+      console.log(`Accept URL: ${acceptUrl}`);
+      console.log('========================================\n');
+      return;
+    }
+
+    const subject = `${inviterName} invited you to join ${orgName} on Alternate Clouds`;
+    const text = `${inviterName} invited you to join ${orgName} as a ${role} on Alternate Clouds.\n\nAccept the invitation:\n${acceptUrl}\n\nThis invitation expires in 7 days. If you weren't expecting this, you can ignore this email.`;
+    const html = `
+      <!DOCTYPE html>
+      <html>
+        <head><meta charset="utf-8"></head>
+        <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; line-height: 1.6; color: #333;">
+          <div style="max-width: 600px; margin: 0 auto; padding: 20px;">
+            <h2>You've been invited to ${orgName}</h2>
+            <p><strong>${inviterName}</strong> invited you to join <strong>${orgName}</strong> as a <strong>${role}</strong> on Alternate Clouds.</p>
+            <a href="${acceptUrl}"
+               style="display: inline-block; background: #0026FF; color: white; padding: 12px 24px;
+                      border-radius: 6px; text-decoration: none; margin: 16px 0; font-weight: 600;">
+              Accept Invitation
+            </a>
+            <p>Or copy and paste this link into your browser:</p>
+            <p style="word-break: break-all; color: #666;">${acceptUrl}</p>
+            <p style="color: #6b7280; font-size: 14px;">This invitation expires in <strong>7 days</strong>. If you weren't expecting this, you can ignore this email.</p>
+            <div style="font-size: 12px; color: #666; margin-top: 40px; border-top: 1px solid #eee; padding-top: 16px;">
+              <p>&copy; ${new Date().getFullYear()} Alternate Clouds. All rights reserved.</p>
+            </div>
+          </div>
+        </body>
+      </html>
+    `;
+
+    await this.sendEmail({ to: email, subject, text, html });
+  }
 }
 
 // Create singleton instance

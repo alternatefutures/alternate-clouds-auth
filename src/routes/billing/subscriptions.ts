@@ -47,6 +47,42 @@ const updateSeatsSchema = z.object({
   seats: z.number().int().min(1),
 });
 
+const changePlanSchema = z.object({
+  targetPlanId: z.string().min(1),
+});
+
+type BillingAuthResult = { ok: true } | { ok: false; status: 400 | 403 | 404; error: string };
+
+/**
+ * Authorize a billing-mutating action on a subscription. For org subscriptions
+ * the caller must be OWNER/ADMIN; for personal subscriptions they must own the
+ * billing customer. Mirrors the inline guards used by cancel + seats.
+ */
+async function authorizeSubscriptionBilling(
+  userId: string,
+  subscription: { org_billing_id?: string; customer_id: string },
+): Promise<BillingAuthResult> {
+  if (subscription.org_billing_id) {
+    const orgBilling = await dbService.getOrganizationBillingById(subscription.org_billing_id);
+    if (orgBilling) {
+      const member = await dbService.getOrganizationMember(orgBilling.organization_id, userId);
+      if (!member) {
+        return { ok: false, status: 403, error: 'Not a member of this organization' };
+      }
+      if (member.role !== 'OWNER' && member.role !== 'ADMIN') {
+        return { ok: false, status: 403, error: 'OWNER or ADMIN role required for billing changes' };
+      }
+    }
+    return { ok: true };
+  }
+
+  const customer = await dbService.getBillingCustomerByUserId(userId);
+  if (!customer || subscription.customer_id !== customer.id) {
+    return { ok: false, status: 404, error: 'Subscription not found' };
+  }
+  return { ok: true };
+}
+
 /** Serialize plan fields for API responses (never expose internal markup) */
 function serializePlanForResponse(plan: SubscriptionPlan) {
   return {
@@ -560,8 +596,10 @@ app.put('/:id/seats', async (c) => {
     if (subscription.stripe_subscription_id) {
       const provider = getDefaultProvider();
       if (provider.updateSubscription) {
+        // Immediate proration (decision #7) — charge/credit the card now.
         await provider.updateSubscription(subscription.stripe_subscription_id, {
           quantity: data.seats,
+          prorationBehavior: 'always_invoice',
         });
       }
     }
@@ -587,6 +625,189 @@ app.put('/:id/seats', async (c) => {
     }
 
     return c.json({ error: 'Failed to update subscription seats' }, 500);
+  }
+});
+
+/**
+ * GET /billing/subscriptions/:id/change-plan/preview?targetPlanId=
+ * Preview the immediate charge / customer-balance credit of switching plans
+ * (annual↔monthly) at the current seat count. UI-only — Stripe computes the
+ * authoritative amounts when the switch is confirmed.
+ */
+app.get('/:id/change-plan/preview', async (c) => {
+  try {
+    const user = requireAuthUser(c);
+    const subscriptionId = c.req.param('id');
+    const targetPlanId = c.req.query('targetPlanId');
+
+    if (!targetPlanId) {
+      return c.json({ error: 'Missing targetPlanId' }, 400);
+    }
+
+    const subscription = await dbService.getSubscriptionById(subscriptionId);
+    if (!subscription) {
+      return c.json({ error: 'Subscription not found' }, 404);
+    }
+
+    const authz = await authorizeSubscriptionBilling(user.userId, subscription);
+    if (!authz.ok) {
+      return c.json({ error: authz.error }, authz.status);
+    }
+
+    if (!subscription.stripe_subscription_id) {
+      return c.json({ error: 'Subscription has no active payment link' }, 400);
+    }
+
+    const targetPlan = await dbService.getSubscriptionPlanById(targetPlanId);
+    if (!targetPlan || !targetPlan.is_active) {
+      return c.json({ error: 'Target plan not found or inactive' }, 404);
+    }
+    if (targetPlan.id === subscription.plan_id) {
+      return c.json({ error: 'Already on this plan' }, 400);
+    }
+    if (!targetPlan.stripe_price_id) {
+      return c.json({ error: 'Target plan is misconfigured — no Stripe price linked' }, 500);
+    }
+
+    const provider = getDefaultProvider();
+    if (!provider.previewSubscriptionChange) {
+      return c.json({ error: 'Payment provider does not support plan-change preview' }, 501);
+    }
+
+    const preview = await provider.previewSubscriptionChange({
+      subscriptionId: subscription.stripe_subscription_id,
+      priceId: targetPlan.stripe_price_id,
+      quantity: subscription.seats,
+      prorationBehavior: 'always_invoice',
+      resetBillingAnchor: true,
+    });
+
+    // A negative ending balance is a customer-balance credit (e.g. annual→monthly
+    // downgrade) that Stripe auto-applies to future subscription invoices.
+    const creditToBalanceCents = preview.endingBalanceCents < 0
+      ? Math.abs(preview.endingBalanceCents)
+      : 0;
+
+    return c.json({
+      amountDueNowCents: Math.max(0, preview.amountDueCents),
+      creditToBalanceCents,
+      currency: preview.currency,
+      seats: subscription.seats,
+      targetPlan: {
+        id: targetPlan.id,
+        name: targetPlan.name,
+        billingInterval: targetPlan.billing_interval,
+        basePricePerSeat: targetPlan.base_price_per_seat,
+      },
+    });
+  } catch (error) {
+    console.error('Change-plan preview error:', error);
+    return c.json({ error: 'Failed to preview plan change' }, 500);
+  }
+});
+
+/**
+ * POST /billing/subscriptions/:id/change-plan { targetPlanId }
+ * Switch a subscription between MONTHLY and YEARLY (OWNER/ADMIN).
+ *
+ * Stripe computes proration with `always_invoice` and we reset the billing
+ * cycle to the switch date:
+ *   - monthly→annual upgrade → immediate prorated card charge.
+ *   - annual→monthly downgrade → prorated credit; when it exceeds the new
+ *     invoice it lands on the Stripe CUSTOMER BALANCE (decision #9) and
+ *     auto-applies to future seat/subscription invoices. No card refund, no
+ *     wallet involvement, never expires.
+ * Seat count is preserved across the switch (decision: seats are interval-independent).
+ */
+app.post('/:id/change-plan', async (c) => {
+  try {
+    const user = requireAuthUser(c);
+    const subscriptionId = c.req.param('id');
+    const body = await c.req.json();
+    const { targetPlanId } = changePlanSchema.parse(body);
+
+    const subscription = await dbService.getSubscriptionById(subscriptionId);
+    if (!subscription) {
+      return c.json({ error: 'Subscription not found' }, 404);
+    }
+
+    const authz = await authorizeSubscriptionBilling(user.userId, subscription);
+    if (!authz.ok) {
+      return c.json({ error: authz.error }, authz.status);
+    }
+
+    if (subscription.status !== 'ACTIVE') {
+      return c.json({ error: 'Only an active subscription can change plans' }, 400);
+    }
+    if (!subscription.stripe_subscription_id) {
+      return c.json({ error: 'Subscription has no active payment link' }, 400);
+    }
+
+    const targetPlan = await dbService.getSubscriptionPlanById(targetPlanId);
+    if (!targetPlan || !targetPlan.is_active) {
+      return c.json({ error: 'Target plan not found or inactive' }, 404);
+    }
+    if (targetPlan.id === subscription.plan_id) {
+      return c.json({ error: 'Already on this plan' }, 400);
+    }
+    if (!targetPlan.stripe_price_id) {
+      return c.json({ error: 'Target plan is misconfigured — no Stripe price linked' }, 500);
+    }
+
+    const provider = getDefaultProvider();
+    if (!provider.updateSubscription) {
+      return c.json({ error: 'Payment provider does not support plan changes' }, 500);
+    }
+
+    // Switch the subscription item to the new price, keep the seat count, invoice
+    // the prorated delta immediately, and reset the cycle to today so the new
+    // interval starts now.
+    await provider.updateSubscription(subscription.stripe_subscription_id, {
+      priceId: targetPlan.stripe_price_id,
+      quantity: subscription.seats,
+      prorationBehavior: 'always_invoice',
+      billingCycleAnchorNow: true,
+    });
+
+    // Recompute the period for the new interval from now. The
+    // customer.subscription.updated webhook will reconcile these from Stripe's
+    // authoritative values; this keeps the UI correct before the webhook lands.
+    const now = Date.now();
+    const periodEnd = new Date(now);
+    if (targetPlan.billing_interval === 'YEARLY') {
+      periodEnd.setFullYear(periodEnd.getFullYear() + 1);
+    } else {
+      periodEnd.setMonth(periodEnd.getMonth() + 1);
+    }
+
+    await dbService.updateSubscription(subscriptionId, {
+      plan_id: targetPlan.id,
+      current_period_start: now,
+      current_period_end: periodEnd.getTime(),
+    });
+
+    const updated = await dbService.getSubscriptionById(subscriptionId);
+
+    return c.json({
+      subscription: {
+        id: updated!.id,
+        plan: targetPlan.name,
+        billingInterval: targetPlan.billing_interval,
+        status: updated!.status,
+        seats: updated!.seats,
+        basePricePerSeat: targetPlan.base_price_per_seat,
+        currentPeriodStart: updated!.current_period_start,
+        currentPeriodEnd: updated!.current_period_end,
+      },
+    });
+  } catch (error) {
+    console.error('Change plan error:', error);
+
+    if (error instanceof z.ZodError) {
+      return c.json({ error: 'Invalid request data', details: error.issues }, 400);
+    }
+
+    return c.json({ error: 'Failed to change plan' }, 500);
   }
 });
 
