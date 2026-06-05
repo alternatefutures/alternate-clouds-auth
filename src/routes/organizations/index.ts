@@ -11,6 +11,7 @@ import {
   acceptInvitationByToken,
   getInvitationByRawToken,
   detachMember,
+  updateMemberScope,
 } from '../../services/invites.service';
 import { canOrgInviteMembers } from '../../services/seatBilling.service';
 
@@ -196,6 +197,8 @@ app.get('/:id/members', standardRateLimit, async (c) => {
           displayName: user?.display_name,
           avatarUrl: user?.avatar_url,
           joinedAt: new Date(member.created_at).toISOString(),
+          accessAllProjects: member.access_all_projects,
+          projectIds: member.project_ids,
         };
       })
     );
@@ -252,6 +255,12 @@ app.patch('/:id/members/:userId/role', standardRateLimit, async (c) => {
     }
 
     await dbService.updateOrganizationMemberRole(orgId, targetUserId, role);
+
+    // Elevating to ADMIN grants full project access — keep the platform mirror
+    // consistent (role here is only ever ADMIN | MEMBER).
+    if (role === 'ADMIN') {
+      await updateMemberScope(orgId, targetUserId, { accessAllProjects: true, projectIds: [] });
+    }
     return c.json({ success: true, userId: targetUserId, role });
   } catch (error) {
     if (error instanceof z.ZodError) {
@@ -259,6 +268,47 @@ app.patch('/:id/members/:userId/role', standardRateLimit, async (c) => {
     }
     console.error('Update member role error:', error);
     return c.json({ error: 'Failed to update member role' }, 500);
+  }
+});
+
+const updateAccessSchema = z.object({
+  accessAllProjects: z.boolean(),
+  projectIds: z.array(z.string()).optional().default([]),
+});
+
+/**
+ * PATCH /organizations/:id/members/:userId/access
+ * Update a member's project-scoped access (OWNER/ADMIN). OWNER/ADMIN members
+ * always retain full access — scope only applies to MEMBERs.
+ */
+app.patch('/:id/members/:userId/access', standardRateLimit, async (c) => {
+  try {
+    const authUser = requireAuthUser(c);
+    const orgId = c.req.param('id');
+    const targetUserId = c.req.param('userId');
+
+    const adminCheck = await requireOrgAdmin(orgId, authUser.userId);
+    if ('error' in adminCheck) {
+      return c.json({ error: adminCheck.error }, adminCheck.status);
+    }
+
+    const target = await dbService.getOrganizationMember(orgId, targetUserId);
+    if (!target) {
+      return c.json({ error: 'Member not found' }, 404);
+    }
+    if (target.role === 'OWNER' || target.role === 'ADMIN') {
+      return c.json({ error: 'OWNER and ADMIN members always have full project access' }, 400);
+    }
+
+    const { accessAllProjects, projectIds } = updateAccessSchema.parse(await c.req.json());
+    await updateMemberScope(orgId, targetUserId, { accessAllProjects, projectIds });
+    return c.json({ success: true, userId: targetUserId, accessAllProjects, projectIds: accessAllProjects ? [] : projectIds });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return c.json({ error: 'Validation error', details: error.issues }, 400);
+    }
+    console.error('Update member access error:', error);
+    return c.json({ error: 'Failed to update member access' }, 500);
   }
 });
 
@@ -311,6 +361,8 @@ app.delete('/:id/members/:userId', standardRateLimit, async (c) => {
 const createInviteSchema = z.object({
   email: z.string().email(),
   role: z.enum(['ADMIN', 'MEMBER']).optional().default('MEMBER'),
+  accessAllProjects: z.boolean().optional().default(true),
+  projectIds: z.array(z.string()).optional().default([]),
 });
 
 /**
@@ -327,7 +379,7 @@ app.post('/:id/invitations', standardRateLimit, async (c) => {
       return c.json({ error: adminCheck.error }, adminCheck.status);
     }
 
-    const { email, role } = createInviteSchema.parse(await c.req.json());
+    const { email, role, accessAllProjects, projectIds } = createInviteSchema.parse(await c.req.json());
     const normalizedEmail = email.trim().toLowerCase();
 
     // Gate: org must be on an ACTIVE paid plan to add seats.
@@ -356,6 +408,8 @@ app.post('/:id/invitations', standardRateLimit, async (c) => {
       email: normalizedEmail,
       role,
       invitedByUserId: authUser.userId,
+      accessAllProjects,
+      projectIds,
     });
 
     const org = await dbService.getOrganizationById(orgId);
@@ -465,6 +519,8 @@ app.get('/:id/invitations', standardRateLimit, async (c) => {
         status: inv.status,
         createdAt: inv.createdAt.toISOString(),
         expiresAt: inv.expiresAt.toISOString(),
+        accessAllProjects: inv.accessAllProjects,
+        projectIds: inv.projectIds,
       })),
     });
   } catch (error) {
