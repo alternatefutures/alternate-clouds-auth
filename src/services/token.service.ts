@@ -158,6 +158,14 @@ export class TokenService {
     // Trim name for storage consistency
     const trimmedName = name.trim();
 
+    // Reject duplicate names for this user (case-insensitive)
+    const existingTokens = await this.listTokens(userId);
+    if (existingTokens.some((t) => t.name.toLowerCase() === trimmedName.toLowerCase())) {
+      const error = new Error('A token with this name already exists.') as Error & { code: string };
+      error.code = 'DUPLICATE_TOKEN_NAME';
+      throw error;
+    }
+
     return this.createTokenWithRetries(userId, trimmedName, expiresAt, organizationId, 0);
   }
 

@@ -100,6 +100,14 @@ app.post('/', standardRateLimit, async (c) => {
       }, 400);
     }
 
+    // Handle duplicate token name errors
+    if (error.code === 'DUPLICATE_TOKEN_NAME') {
+      return c.json({
+        error: error.message,
+        code: 'DUPLICATE_TOKEN_NAME',
+      }, 409);
+    }
+
     // Handle invalid token name errors
     if (error.code === 'INVALID_TOKEN_NAME') {
       return c.json({
@@ -143,10 +151,13 @@ app.get('/', standardRateLimit, async (c) => {
  * DELETE /tokens/:id
  * Delete a personal access token
  */
-app.delete('/:id', standardRateLimit, async (c) => {
+app.delete('/:id', authMiddleware, standardRateLimit, async (c) => {
   try {
     const authUser = requireAuthUser(c);
     const tokenId = c.req.param('id');
+    if (!tokenId) {
+      return c.json({ error: 'Token not found' }, 404);
+    }
 
     // Delete token
     await tokenService.deleteToken(tokenId, authUser.userId);
