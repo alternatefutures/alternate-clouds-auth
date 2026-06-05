@@ -267,6 +267,13 @@ model OrganizationMember {
   role           OrgRole  @default(MEMBER)
   createdAt      DateTime @default(now()) @map("created_at")
 
+  // Project-scoped access. When `accessAllProjects` is true the member can see
+  // every project in the org (the default, and always true for OWNER/ADMIN).
+  // When false, access is restricted to the platform project IDs in
+  // `projectIds` (opaque to auth — they belong to the platform DB).
+  accessAllProjects Boolean  @default(true) @map("access_all_projects")
+  projectIds        String[] @default([]) @map("project_ids")
+
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   user         AuthUser     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
@@ -289,6 +296,11 @@ model OrganizationInvitation {
   acceptedByUserId String?          @map("accepted_by_user_id")
   createdAt        DateTime         @default(now()) @map("created_at")
   updatedAt        DateTime         @updatedAt @map("updated_at")
+
+  // Project-scoped access to apply when the invite is accepted. Mirrors
+  // OrganizationMember: `accessAllProjects` true => full org access.
+  accessAllProjects Boolean  @default(true) @map("access_all_projects")
+  projectIds        String[] @default([]) @map("project_ids")
 
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
 

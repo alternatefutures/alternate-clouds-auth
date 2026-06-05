@@ -36,12 +36,19 @@ export async function createOrRefreshInvitation(params: {
   email: string;
   role: InvitableRole;
   invitedByUserId: string;
+  accessAllProjects?: boolean;
+  projectIds?: string[];
 }): Promise<{ invitationId: string; rawToken: string; email: string }> {
   const prisma = dbService.prismaClient;
   const email = normalizeEmail(params.email);
   const rawToken = generateInviteToken();
   const tokenHash = hashToken(rawToken);
   const expiresAt = new Date(Date.now() + INVITE_TTL_MS);
+
+  // ADMIN invites always carry full access; only MEMBER invites can be scoped.
+  const accessAllProjects =
+    params.role === 'ADMIN' ? true : params.accessAllProjects ?? true;
+  const projectIds = accessAllProjects ? [] : params.projectIds ?? [];
 
   const invitation = await prisma.organizationInvitation.upsert({
     where: {
@@ -56,6 +63,8 @@ export async function createOrRefreshInvitation(params: {
       tokenHash,
       invitedByUserId: params.invitedByUserId,
       expiresAt,
+      accessAllProjects,
+      projectIds,
     },
     update: {
       role: params.role as OrgRole,
@@ -65,6 +74,8 @@ export async function createOrRefreshInvitation(params: {
       expiresAt,
       acceptedAt: null,
       acceptedByUserId: null,
+      accessAllProjects,
+      projectIds,
     },
   });
 
@@ -102,26 +113,90 @@ function isInviteUsable(status: InvitationStatus, expiresAt: Date): boolean {
 }
 
 /**
- * Add a user to an org as a member (idempotent), then reconcile seat count.
- * This is THE membership-add funnel — keep seat sync here.
+ * Add a user to an org as a member (idempotent), then reconcile seat count
+ * and push the member's project scope to the platform DB.
+ * This is THE membership-add funnel — keep seat sync + scope push here.
  */
 export async function attachMember(
   organizationId: string,
   userId: string,
   role: OrgRole,
+  scope?: { accessAllProjects: boolean; projectIds: string[] },
 ): Promise<{ created: boolean }> {
   const existing = await dbService.getOrganizationMember(organizationId, userId);
   if (existing) {
     return { created: false };
   }
-  await dbService.createOrganizationMember({
+  const member = await dbService.createOrganizationMember({
     id: nanoid(),
     organization_id: organizationId,
     user_id: userId,
     role,
+    access_all_projects: scope?.accessAllProjects ?? true,
+    project_ids: scope?.projectIds ?? [],
+  });
+  await pushMemberScopeToPlatform(organizationId, userId, {
+    role,
+    accessAllProjects: member.access_all_projects,
+    projectIds: member.project_ids,
   });
   await syncOrgSeats(organizationId, { reason: 'member_added' });
   return { created: true };
+}
+
+/**
+ * Push a member's role + project scope to service-cloud-api so the platform DB
+ * mirror (used by `assertProjectAccess`) stays in sync. Best-effort: the auth
+ * DB is the source of truth, and the platform also refreshes scope on lazy
+ * membership sync from `/auth/me`.
+ */
+export async function pushMemberScopeToPlatform(
+  organizationId: string,
+  userId: string,
+  scope: { role: OrgRole; accessAllProjects: boolean; projectIds: string[] },
+): Promise<void> {
+  const cloudApiUrl = process.env.CLOUD_API_URL;
+  const secret = process.env.AUTH_INTROSPECTION_SECRET;
+  if (!cloudApiUrl) {
+    console.warn('[invites] CLOUD_API_URL not set — skipping platform scope push');
+    return;
+  }
+  try {
+    const res = await fetch(`${cloudApiUrl}/internal/org/member-scope`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(secret ? { 'x-af-introspection-secret': secret } : {}),
+      },
+      body: JSON.stringify({ organizationId, userId, ...scope }),
+    });
+    if (!res.ok) {
+      console.error(
+        `[invites] platform scope push returned ${res.status} for org ${organizationId} user ${userId}`,
+      );
+    }
+  } catch (err) {
+    console.error('[invites] failed to push platform member scope:', err);
+  }
+}
+
+/**
+ * Update an existing member's project scope (auth DB) and push to the platform.
+ */
+export async function updateMemberScope(
+  organizationId: string,
+  userId: string,
+  access: { accessAllProjects: boolean; projectIds: string[] },
+): Promise<void> {
+  await dbService.updateOrganizationMemberAccess(organizationId, userId, access);
+  const member = await dbService.getOrganizationMember(organizationId, userId);
+  if (member) {
+    await pushMemberScopeToPlatform(organizationId, userId, {
+      role: member.role,
+      accessAllProjects: member.access_all_projects,
+      projectIds: member.project_ids,
+    });
+  }
 }
 
 /**
@@ -198,7 +273,10 @@ export async function acceptInvitationByToken(params: {
     return { ok: false, reason: 'email_mismatch' };
   }
 
-  await attachMember(invite.organizationId, params.userId, invite.role);
+  await attachMember(invite.organizationId, params.userId, invite.role, {
+    accessAllProjects: invite.accessAllProjects,
+    projectIds: invite.projectIds,
+  });
   await prisma.organizationInvitation.update({
     where: { id: invite.id },
     data: { status: 'ACCEPTED', acceptedAt: new Date(), acceptedByUserId: params.userId },
@@ -227,7 +305,10 @@ export async function reconcilePendingInvites(userId: string, email: string): Pr
       continue;
     }
     try {
-      await attachMember(invite.organizationId, userId, invite.role);
+      await attachMember(invite.organizationId, userId, invite.role, {
+        accessAllProjects: invite.accessAllProjects,
+        projectIds: invite.projectIds,
+      });
       await prisma.organizationInvitation.update({
         where: { id: invite.id },
         data: { status: 'ACCEPTED', acceptedAt: now, acceptedByUserId: userId },

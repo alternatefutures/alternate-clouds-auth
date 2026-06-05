@@ -179,6 +179,10 @@ export interface OrganizationMember {
   user_id: string;
   role: OrgRole;
   created_at: number;
+  /** Project-scoped access. true => access to every project in the org. */
+  access_all_projects: boolean;
+  /** Platform project IDs a scoped member may access (when access_all_projects is false). */
+  project_ids: string[];
 }
 
 export interface OrganizationBilling {
@@ -1340,7 +1344,9 @@ export class DatabaseService {
     };
   }
 
-  async getOrganizationsByUserId(userId: string): Promise<Array<Organization & { role: OrgRole }>> {
+  async getOrganizationsByUserId(
+    userId: string,
+  ): Promise<Array<Organization & { role: OrgRole; access_all_projects: boolean; project_ids: string[] }>> {
     const results = await this.prisma.organizationMember.findMany({
       where: { userId },
       include: { organization: true },
@@ -1355,6 +1361,8 @@ export class DatabaseService {
       created_at: result.organization.createdAt.getTime(),
       updated_at: result.organization.updatedAt.getTime(),
       role: result.role as OrgRole,
+      access_all_projects: result.accessAllProjects,
+      project_ids: result.projectIds,
     }));
   }
 
@@ -1379,13 +1387,23 @@ export class DatabaseService {
   // ORGANIZATION MEMBER METHODS
   // ============================================
 
-  async createOrganizationMember(member: Omit<OrganizationMember, 'created_at'>): Promise<OrganizationMember> {
+  async createOrganizationMember(
+    member: Omit<OrganizationMember, 'created_at' | 'access_all_projects' | 'project_ids'> &
+      Partial<Pick<OrganizationMember, 'access_all_projects' | 'project_ids'>>,
+  ): Promise<OrganizationMember> {
+    // Role-elevated members (OWNER/ADMIN) always have full project access.
+    const fullByRole = member.role === 'OWNER' || member.role === 'ADMIN';
+    const accessAllProjects = fullByRole ? true : member.access_all_projects ?? true;
+    const projectIds = accessAllProjects ? [] : member.project_ids ?? [];
+
     const result = await this.prisma.organizationMember.create({
       data: {
         id: member.id,
         organizationId: member.organization_id,
         userId: member.user_id,
         role: member.role,
+        accessAllProjects,
+        projectIds,
       },
     });
 
@@ -1395,6 +1413,8 @@ export class DatabaseService {
       user_id: result.userId,
       role: result.role as OrgRole,
       created_at: result.createdAt.getTime(),
+      access_all_projects: result.accessAllProjects,
+      project_ids: result.projectIds,
     };
   }
 
@@ -1413,6 +1433,8 @@ export class DatabaseService {
       user_id: result.userId,
       role: result.role as OrgRole,
       created_at: result.createdAt.getTime(),
+      access_all_projects: result.accessAllProjects,
+      project_ids: result.projectIds,
     };
   }
 
@@ -1428,15 +1450,44 @@ export class DatabaseService {
       user_id: result.userId,
       role: result.role as OrgRole,
       created_at: result.createdAt.getTime(),
+      access_all_projects: result.accessAllProjects,
+      project_ids: result.projectIds,
     }));
   }
 
   async updateOrganizationMemberRole(organizationId: string, userId: string, role: OrgRole): Promise<void> {
+    // Elevating to OWNER/ADMIN grants full project access; demoting to MEMBER
+    // preserves whatever scope was previously set.
+    const data: Record<string, unknown> = { role };
+    if (role === 'OWNER' || role === 'ADMIN') {
+      data.accessAllProjects = true;
+      data.projectIds = [];
+    }
     await this.prisma.organizationMember.update({
       where: {
         organizationId_userId: { organizationId, userId },
       },
-      data: { role },
+      data,
+    });
+  }
+
+  /**
+   * Update a member's project-scoped access. OWNER/ADMIN members always keep
+   * full access (scope is a MEMBER-only concept) — callers should guard, but we
+   * also normalize here for safety.
+   */
+  async updateOrganizationMemberAccess(
+    organizationId: string,
+    userId: string,
+    access: { accessAllProjects: boolean; projectIds: string[] },
+  ): Promise<void> {
+    const accessAllProjects = access.accessAllProjects;
+    const projectIds = accessAllProjects ? [] : access.projectIds;
+    await this.prisma.organizationMember.update({
+      where: {
+        organizationId_userId: { organizationId, userId },
+      },
+      data: { accessAllProjects, projectIds },
     });
   }
 

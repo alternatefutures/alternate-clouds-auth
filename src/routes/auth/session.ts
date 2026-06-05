@@ -226,6 +226,8 @@ app.get('/me', authMiddleware, async (c) => {
         name: org.name,
         avatarUrl: org.avatar_url,
         role: org.role,
+        accessAllProjects: org.access_all_projects,
+        projectIds: org.project_ids,
       })),
     });
   } catch (error) {
