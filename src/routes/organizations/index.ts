@@ -13,7 +13,8 @@ import {
   detachMember,
   updateMemberScope,
 } from '../../services/invites.service';
-import { canOrgInviteMembers } from '../../services/seatBilling.service';
+import { canOrgInviteMembers, cancelOrgSubscription } from '../../services/seatBilling.service';
+import { suspendOrgDeployments } from '../../services/trialScheduler';
 
 const app = new Hono();
 
@@ -57,6 +58,54 @@ app.get('/', standardRateLimit, async (c) => {
   } catch (error) {
     console.error('List organizations error:', error);
     return c.json({ error: 'Failed to list organizations' }, 500);
+  }
+});
+
+// Schema for creating an organization
+const createOrgSchema = z.object({
+  name: z.string().min(1).max(100),
+});
+
+/**
+ * POST /organizations
+ * Create a new organization owned by the current user. The caller becomes
+ * OWNER. NO free trial is provisioned for additional orgs — the org is created
+ * with an INACTIVE subscription and cannot deploy until the owner subscribes.
+ */
+app.post('/', standardRateLimit, async (c) => {
+  try {
+    const authUser = requireAuthUser(c);
+
+    const body = await c.req.json();
+    const { name } = createOrgSchema.parse(body);
+
+    const organization = await dbService.createOrganizationForUser({
+      userId: authUser.userId,
+      orgName: name.trim(),
+    });
+
+    return c.json(
+      {
+        success: true,
+        organization: {
+          id: organization.id,
+          slug: organization.slug,
+          name: organization.name,
+          avatarUrl: organization.avatar_url,
+          role: 'OWNER',
+          createdAt: new Date(organization.created_at).toISOString(),
+        },
+      },
+      201
+    );
+  } catch (error) {
+    console.error('Create organization error:', error);
+
+    if (error instanceof z.ZodError) {
+      return c.json({ error: 'Validation error', details: error.issues }, 400);
+    }
+
+    return c.json({ error: 'Failed to create organization' }, 500);
   }
 });
 
@@ -164,6 +213,68 @@ app.patch('/:id', standardRateLimit, async (c) => {
     }
 
     return c.json({ error: 'Failed to update organization' }, 500);
+  }
+});
+
+/**
+ * DELETE /organizations/:id
+ * Delete an organization (OWNER only). Personal organizations
+ * (slug `user-…`) cannot be deleted. Cascades to members, billing,
+ * subscriptions, invitations, tokens, and usage records.
+ */
+app.delete('/:id', standardRateLimit, async (c) => {
+  try {
+    const authUser = requireAuthUser(c);
+    const orgId = c.req.param('id');
+
+    const member = await dbService.getOrganizationMember(orgId, authUser.userId);
+
+    if (!member) {
+      return c.json({ error: 'Organization not found or access denied' }, 404);
+    }
+
+    if (member.role !== 'OWNER') {
+      return c.json({ error: 'Insufficient permissions. OWNER role required.' }, 403);
+    }
+
+    const organization = await dbService.getOrganizationById(orgId);
+    if (!organization) {
+      return c.json({ error: 'Organization not found' }, 404);
+    }
+
+    // Personal organizations are not deletable.
+    if (organization.slug.startsWith('user-')) {
+      return c.json({ error: 'Personal organizations cannot be deleted.' }, 400);
+    }
+
+    // Cancel any live Stripe subscription FIRST. Deleting the org cascades its
+    // DB rows but does NOT touch Stripe — a live subscription would keep billing
+    // the customer for a deleted org. Unused paid time is credited to the
+    // customer balance (kept on the per-user BillingCustomer). If cancellation
+    // fails, abort the delete so we never orphan a billing subscription.
+    try {
+      await cancelOrgSubscription(orgId);
+    } catch (cancelErr) {
+      console.error(`Failed to cancel subscription before deleting org ${orgId}:`, cancelErr);
+      return c.json(
+        { error: 'Could not cancel the active subscription. Please try again.' },
+        502,
+      );
+    }
+
+    // Tear down running compute BEFORE the DB rows are cascade-deleted, otherwise
+    // Akash/Phala/Spheron workloads keep running with no org to manage or bill
+    // them (High #3). Best-effort — a teardown failure must not block deletion.
+    await suspendOrgDeployments(orgId).catch((err) =>
+      console.error(`Failed to suspend deployments before deleting org ${orgId}:`, err),
+    );
+
+    await dbService.deleteOrganization(orgId);
+
+    return c.json({ success: true });
+  } catch (error) {
+    console.error('Delete organization error:', error);
+    return c.json({ error: 'Failed to delete organization' }, 500);
   }
 });
 

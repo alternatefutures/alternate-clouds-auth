@@ -42,14 +42,17 @@ app.post('/stripe', async (c) => {
     // Parse event
     const event = provider.parseWebhookEvent(body);
 
-    // Check for duplicate
+    // Dedupe only on SUCCESSFULLY processed events. A row that exists but is
+    // unprocessed (a prior attempt threw mid-processing → 500) must be
+    // REPROCESSED on the provider's retry, not acknowledged with 200 — otherwise
+    // it stays permanently half-processed.
     const existingEvent = await dbService.getWebhookEventByProviderAndEventId('stripe', event.id);
-    if (existingEvent) {
+    if (existingEvent?.processed) {
       return c.json({ received: true, duplicate: true });
     }
 
-    // Store event
-    const dbRecord = await dbService.createWebhookEvent({
+    // Reuse the existing (unprocessed) row on retry; only create on first sight.
+    const dbRecord = existingEvent ?? await dbService.createWebhookEvent({
       id: nanoid(),
       provider: 'stripe',
       event_type: event.type,
@@ -100,14 +103,13 @@ app.post('/stax', async (c) => {
     // Parse event
     const event = provider.parseWebhookEvent(body);
 
-    // Check for duplicate
+    // Dedupe only on SUCCESSFULLY processed events; reprocess unprocessed retries.
     const existingEvent = await dbService.getWebhookEventByProviderAndEventId('stax', event.id);
-    if (existingEvent) {
+    if (existingEvent?.processed) {
       return c.json({ received: true, duplicate: true });
     }
 
-    // Store event
-    const dbRecord = await dbService.createWebhookEvent({
+    const dbRecord = existingEvent ?? await dbService.createWebhookEvent({
       id: nanoid(),
       provider: 'stax',
       event_type: event.type,
@@ -157,14 +159,13 @@ app.post('/relay', async (c) => {
     // Parse event
     const event = provider.parseWebhookEvent(body);
 
-    // Check for duplicate
+    // Dedupe only on SUCCESSFULLY processed events; reprocess unprocessed retries.
     const existingEvent = await dbService.getWebhookEventByProviderAndEventId('relay', event.id);
-    if (existingEvent) {
+    if (existingEvent?.processed) {
       return c.json({ received: true, duplicate: true });
     }
 
-    // Store event
-    const dbRecord = await dbService.createWebhookEvent({
+    const dbRecord = existingEvent ?? await dbService.createWebhookEvent({
       id: nanoid(),
       provider: 'relay',
       event_type: event.type,
@@ -278,6 +279,15 @@ async function processStripeEvent(event: WebhookEvent): Promise<void> {
     case 'customer.subscription.deleted': {
       const subscriptionId = data.id as string;
       const subscription = await dbService.getSubscriptionByStripeId(subscriptionId);
+      if (!subscription) {
+        // H6: trial subs are created with a NULL stripe_subscription_id, so a
+        // lookup by Stripe id can miss a row that exists locally — leaving our
+        // state stale vs Stripe. Surface it instead of silently dropping.
+        console.warn(
+          `[webhook] ${event.type}: no local subscription matched Stripe sub ${subscriptionId} ` +
+            `(event ${event.id}); local state may be stale`,
+        );
+      }
       if (subscription) {
         const status = data.status as string;
         const statusMap: Record<string, string> = {
@@ -341,6 +351,15 @@ async function processStripeEvent(event: WebhookEvent): Promise<void> {
         }
 
         await dbService.updateSubscription(subscription.id, updates);
+
+        // H1: mirror the sub's payment method onto the customer's invoice
+        // default so renewal + one-off (trial seat) invoices collect. Catch-all
+        // for every subscribe path (Checkout, SetupIntent). Idempotent.
+        try {
+          await getProvider('stripe').syncSubscriptionDefaultPaymentMethodToCustomer?.(subscriptionId);
+        } catch (pmErr) {
+          console.error('[webhook] failed to sync customer default PM (non-fatal):', pmErr);
+        }
       }
       break;
     }
@@ -551,6 +570,13 @@ async function processStripeEvent(event: WebhookEvent): Promise<void> {
             current_period_start: now,
             current_period_end: periodEnd.getTime(),
           });
+        }
+
+        // H1: set the customer's invoice default PM from the new subscription.
+        try {
+          await getProvider('stripe').syncSubscriptionDefaultPaymentMethodToCustomer?.(stripeSubscriptionId);
+        } catch (pmErr) {
+          console.error('[webhook] failed to sync customer default PM (non-fatal):', pmErr);
         }
 
         console.log(`Checkout completed: subscription ${stripeSubscriptionId} for user ${userId}, plan ${plan.name}`);

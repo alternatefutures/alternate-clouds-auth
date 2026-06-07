@@ -18,8 +18,9 @@ const GRACE_DAYS = 3;
 /**
  * Tell service-cloud-api to shut down all active deployments for an org.
  * Best-effort — failures are logged but don't block the suspension.
+ * Exported so subscription cancellation and org deletion reuse the same path.
  */
-async function suspendOrgDeployments(organizationId: string): Promise<void> {
+export async function suspendOrgDeployments(organizationId: string): Promise<void> {
   const cloudApiUrl = process.env.CLOUD_API_URL;
   if (!cloudApiUrl) {
     console.warn('[TrialScheduler] CLOUD_API_URL not set — skipping deployment suspension');

@@ -223,19 +223,26 @@ app.post('/verify', strictRateLimit, async (c) => {
         is_primary: 1,
       });
 
-      // Create default organization for new user
+      // Create default organization for new user. Wrapped so a failure here is
+      // logged explicitly (the user + auth method already committed above —
+      // failing silently would orphan the account with no workspace).
       const orgSlug = `user-${user.id.slice(0, 8)}`;
       const shortAddress = address.slice(0, 6) + '...' + address.slice(-4);
-      await dbService.createDefaultOrganizationForUser({
-        orgId: nanoid(),
-        memberId: nanoid(),
-        billingId: nanoid(),
-        billingCustomerId: nanoid(),
-        subscriptionId: nanoid(),
-        userId: user.id,
-        orgSlug,
-        orgName: `${shortAddress}'s Org`,
-      });
+      try {
+        await dbService.createDefaultOrganizationForUser({
+          orgId: nanoid(),
+          memberId: nanoid(),
+          billingId: nanoid(),
+          billingCustomerId: nanoid(),
+          subscriptionId: nanoid(),
+          userId: user.id,
+          orgSlug,
+          orgName: `${shortAddress}'s Org`,
+        });
+      } catch (orgErr) {
+        console.error(`[wallet signup] default org creation failed for user ${user.id} — account has no workspace:`, orgErr);
+        throw orgErr;
+      }
 
       audit(dbService.prismaClient, {
         category: 'user',

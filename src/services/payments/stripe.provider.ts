@@ -23,6 +23,8 @@ import type {
   CheckoutSession,
   PreviewSubscriptionChangeInput,
   SubscriptionChangePreview,
+  ChargeOneOffInvoiceInput,
+  CreditCustomerBalanceInput,
   WebhookEvent,
   ConnectedAccount,
   CreateConnectedAccountInput,
@@ -129,6 +131,42 @@ export class StripeProvider implements PaymentProvider {
         default_payment_method: paymentMethodId,
       },
     });
+  }
+
+  /**
+   * Mirror a subscription's payment method onto the customer's invoice default.
+   * Stripe saves the card to the SUBSCRIPTION's default PM at checkout, but
+   * standalone invoices (trial seat charges) and the customer's other invoices
+   * resolve `customer.invoice_settings.default_payment_method` — which is unset.
+   * Idempotent: does nothing if the customer already has a default PM.
+   */
+  async syncSubscriptionDefaultPaymentMethodToCustomer(subscriptionId: string): Promise<boolean> {
+    const sub = await this.stripe.subscriptions.retrieve(subscriptionId, {
+      expand: ['latest_invoice.payment_intent'],
+    });
+    const customerId = typeof sub.customer === 'string' ? sub.customer : sub.customer.id;
+
+    let pm = typeof sub.default_payment_method === 'string'
+      ? sub.default_payment_method
+      : sub.default_payment_method?.id;
+    if (!pm) {
+      const inv = sub.latest_invoice as Stripe.Invoice | null;
+      const pi = (inv as (Stripe.Invoice & { payment_intent?: Stripe.PaymentIntent | string }) | null)?.payment_intent;
+      const piObj = typeof pi === 'string' ? null : pi;
+      pm = typeof piObj?.payment_method === 'string' ? piObj.payment_method : piObj?.payment_method?.id;
+    }
+    if (!pm) return false;
+
+    const customer = await this.stripe.customers.retrieve(customerId);
+    if (!('deleted' in customer && customer.deleted)) {
+      const current = (customer as Stripe.Customer).invoice_settings?.default_payment_method;
+      if (current) return false; // already set — don't override the user's choice
+    }
+
+    await this.stripe.customers.update(customerId, {
+      invoice_settings: { default_payment_method: pm },
+    });
+    return true;
   }
 
   private mapPaymentMethod(pm: Stripe.PaymentMethod): ExternalPaymentMethod {
@@ -372,11 +410,127 @@ export class StripeProvider implements PaymentProvider {
     };
   }
 
+  /**
+   * Charge the customer's default card immediately for a one-off amount via a
+   * standalone invoice (invoice item → finalize → pay). Used to bill an added
+   * seat during a subscription-wide trial, where a `quantity` change alone does
+   * NOT charge. The charge shows in the customer's Invoices tab. Idempotency
+   * keys are suffixed per call so a retry of the whole operation is a no-op.
+   */
+  async chargeOneOffInvoice(input: ChargeOneOffInvoiceInput): Promise<ExternalInvoice> {
+    const { customerId, amountCents, currency, description, metadata, idempotencyKey } = input;
+
+    // Resolve a payment method to charge. A standalone invoice does NOT inherit
+    // the subscription's default PM — it uses the customer's default, which may
+    // be unset even when cards are attached (e.g. card saved only on the sub
+    // during checkout). Fall back to any attached card so the invoice collects
+    // instead of sitting OPEN.
+    let paymentMethodId = input.paymentMethodId;
+    if (!paymentMethodId) {
+      const customer = await this.stripe.customers.retrieve(customerId);
+      if (!('deleted' in customer && customer.deleted)) {
+        const dpm = (customer as Stripe.Customer).invoice_settings?.default_payment_method;
+        paymentMethodId = typeof dpm === 'string' ? dpm : dpm?.id;
+      }
+    }
+    if (!paymentMethodId) {
+      const pms = await this.stripe.paymentMethods.list({ customer: customerId, type: 'card', limit: 1 });
+      paymentMethodId = pms.data[0]?.id;
+    }
+    if (!paymentMethodId) {
+      throw new Error('No payment method on file to charge one-off invoice');
+    }
+
+    await this.stripe.invoiceItems.create(
+      {
+        customer: customerId,
+        amount: amountCents,
+        currency,
+        description,
+        metadata,
+      },
+      idempotencyKey ? { idempotencyKey: `${idempotencyKey}-item` } : undefined,
+    );
+
+    const invoice = await this.stripe.invoices.create(
+      {
+        customer: customerId,
+        collection_method: 'charge_automatically',
+        auto_advance: true,
+        default_payment_method: paymentMethodId,
+        description,
+        metadata,
+        pending_invoice_items_behavior: 'include',
+      },
+      idempotencyKey ? { idempotencyKey: `${idempotencyKey}-invoice` } : undefined,
+    );
+
+    if (!invoice.id) {
+      throw new Error('Stripe invoice created without an id');
+    }
+
+    // Idempotent finalize+pay. On a retry, the idempotency-keyed create calls
+    // above replay and return the SAME invoice — but `finalizeInvoice`/`pay`
+    // are NOT keyed and would throw "already finalized"/"already paid". So we
+    // re-read the authoritative state and only advance the steps still needed.
+    const invoiceId = invoice.id;
+    let current = await this.stripe.invoices.retrieve(invoiceId);
+
+    if (current.status === 'draft') {
+      try {
+        current = await this.stripe.invoices.finalizeInvoice(invoiceId);
+      } catch (err) {
+        if (!(err instanceof Stripe.errors.StripeInvalidRequestError)) throw err;
+        current = await this.stripe.invoices.retrieve(invoiceId); // already finalized by a racing retry
+      }
+    }
+
+    if (current.status === 'open') {
+      try {
+        current = await this.stripe.invoices.pay(invoiceId, { payment_method: paymentMethodId });
+      } catch (err) {
+        if (!(err instanceof Stripe.errors.StripeInvalidRequestError)) throw err;
+        current = await this.stripe.invoices.retrieve(invoiceId); // already paid by a racing retry
+      }
+    }
+
+    return this.mapInvoice(current);
+  }
+
+  /**
+   * Credit the customer's Stripe balance (negative balance transaction). Stripe
+   * auto-applies it against the next invoice. Used to refund a removed seat's
+   * prorated remainder during a trial.
+   */
+  async creditCustomerBalance(input: CreditCustomerBalanceInput): Promise<{ endingBalanceCents: number }> {
+    const { customerId, amountCents, currency, description, metadata, idempotencyKey } = input;
+
+    const txn = await this.stripe.customers.createBalanceTransaction(
+      customerId,
+      {
+        amount: -Math.abs(amountCents), // negative = credit toward future invoices
+        currency,
+        description,
+        metadata,
+      },
+      idempotencyKey ? { idempotencyKey } : undefined,
+    );
+
+    return { endingBalanceCents: txn.ending_balance };
+  }
+
   async cancelSubscription(subscriptionId: string, input?: CancelSubscriptionInput): Promise<ExternalSubscription> {
     let subscription: Stripe.Subscription;
 
     if (input?.immediately) {
-      subscription = await this.stripe.subscriptions.cancel(subscriptionId);
+      // `prorations: true` credits the unused paid time to the customer balance;
+      // `invoice_now: true` realizes it immediately. Harmless during a trial
+      // (nothing to prorate). The credit persists on the BillingCustomer, which
+      // is per-user and is NOT deleted with the org.
+      subscription = await this.stripe.subscriptions.cancel(subscriptionId, {
+        prorate: input.prorate ?? false,
+        invoice_now: input.invoiceNow ?? false,
+      });
     } else {
       subscription = await this.stripe.subscriptions.update(subscriptionId, {
         cancel_at_period_end: true,

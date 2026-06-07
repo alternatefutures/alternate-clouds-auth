@@ -9,6 +9,7 @@ import { z } from 'zod';
 import { authMiddleware, requireAuthUser } from '../../middleware/auth';
 import { dbService } from '../../services/db.service';
 import { getProvider, isProviderAvailable } from '../../services/payments';
+import { timingSafeCompare } from '../../utils/crypto';
 
 const app = new Hono();
 
@@ -467,7 +468,7 @@ app.get('/balance', async (c) => {
   try {
     const secret = process.env.AUTH_INTROSPECTION_SECRET;
     const provided = c.req.header('x-af-introspection-secret');
-    if (!secret || !provided || provided !== secret) {
+    if (!secret || !provided || !timingSafeCompare(provided, secret)) {
       return c.json({ error: 'Platform admin access required' }, 403);
     }
 
