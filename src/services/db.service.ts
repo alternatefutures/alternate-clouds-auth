@@ -7,6 +7,7 @@
 
 import { Prisma, PrismaClient } from '@prisma/client';
 import { createHash, timingSafeEqual } from 'node:crypto';
+import { nanoid } from 'nanoid';
 
 /**
  * Postgres unique-constraint violation. Centralizing the check keeps the
@@ -254,7 +255,10 @@ export interface SubscriptionPlan {
   updated_at: number;
 }
 
-export type SubscriptionStatus = 'ACTIVE' | 'INCOMPLETE' | 'CANCELED' | 'PAST_DUE' | 'UNPAID' | 'TRIALING' | 'TRIAL_EXPIRED' | 'SUSPENDED';
+// `INACTIVE` = org exists but has never subscribed and has no trial (additional
+// orgs created via the UI). It is a non-entitled state: the deploy gate blocks
+// it, and subscribing converts it to ACTIVE.
+export type SubscriptionStatus = 'ACTIVE' | 'INCOMPLETE' | 'CANCELED' | 'PAST_DUE' | 'UNPAID' | 'TRIALING' | 'TRIAL_EXPIRED' | 'SUSPENDED' | 'INACTIVE';
 
 export interface Subscription {
   id: string;
@@ -1499,6 +1503,18 @@ export class DatabaseService {
     });
   }
 
+  /**
+   * Remove every non-OWNER member of an org. Used when a paid subscription is
+   * canceled — the org is disabled down to just its owner (who can re-subscribe
+   * to recover it). Returns the number of memberships removed.
+   */
+  async removeNonOwnerMembers(organizationId: string): Promise<number> {
+    const result = await this.prisma.organizationMember.deleteMany({
+      where: { organizationId, role: { not: 'OWNER' } },
+    });
+    return result.count;
+  }
+
   async isUserMemberOfOrganization(userId: string, organizationId: string): Promise<boolean> {
     const member = await this.prisma.organizationMember.findUnique({
       where: {
@@ -1618,15 +1634,19 @@ export class DatabaseService {
     const trialEndsAt = new Date(now.getTime() + trialDays * 24 * 60 * 60 * 1000);
     const periodEnd = new Date(now.getTime() + trialDays * 24 * 60 * 60 * 1000);
 
-    // Check if user already has a BillingCustomer (edge case: existing user adding via new auth method)
-    const existingBillingCustomer = await this.prisma.billingCustomer.findUnique({
+    // Get-or-create the user's BillingCustomer race-safely BEFORE the org
+    // transaction. `upsert` on the unique `userId` closes the TOCTOU window
+    // where two concurrent signups both miss a `findUnique` and the second
+    // `create` throws an unhandled P2002, orphaning the user (no org/billing).
+    const billingCustomer = await this.prisma.billingCustomer.upsert({
       where: { userId },
+      create: { id: billingCustomerId, userId },
+      update: {},
     });
-
-    const actualBillingCustomerId = existingBillingCustomer?.id || billingCustomerId;
+    const actualBillingCustomerId = billingCustomer.id;
 
     // Build the transaction operations
-    const operations = [
+    const operations: Prisma.PrismaPromise<any>[] = [
       // 1. Create organization
       this.prisma.organization.create({
         data: {
@@ -1646,18 +1666,6 @@ export class DatabaseService {
         },
       }),
     ];
-
-    // 3. Only create BillingCustomer if user doesn't have one
-    if (!existingBillingCustomer) {
-      operations.push(
-        this.prisma.billingCustomer.create({
-          data: {
-            id: billingCustomerId,
-            userId: userId,
-          },
-        })
-      );
-    }
 
     // 4. Create OrganizationBilling with trial tracking
     operations.push(
@@ -1689,10 +1697,9 @@ export class DatabaseService {
       })
     );
 
-    // Execute transaction (generous timeout for high-latency Akash → remote DB connections)
-    const [org] = await this.prisma.$transaction(operations, {
-      timeout: 30000, // 30s (default is 5s, too tight for cross-datacenter Akash deploys)
-    });
+    // Execute transaction. The array form does not accept a `timeout` option
+    // (that is interactive-transaction only), so it is intentionally omitted.
+    const [org] = await this.prisma.$transaction(operations);
 
     // 6. Seed signup compute credit into the org's usage wallet.
     // Amount is centralized in `getSignupCreditCents()` so the admin
@@ -1720,6 +1727,118 @@ export class DatabaseService {
         console.warn(`[createDefaultOrganizationForUser] Failed to seed signup credit for org ${orgId}:`, error);
       }
     }
+
+    return {
+      id: org.id,
+      slug: org.slug,
+      name: org.name,
+      avatar_url: org.avatarUrl ?? undefined,
+      created_at: org.createdAt.getTime(),
+      updated_at: org.updatedAt.getTime(),
+    };
+  }
+
+  /**
+   * Generate a URL-safe, unique organization slug from a display name.
+   * Never produces a `user-` prefixed slug (reserved for personal orgs).
+   */
+  private async generateUniqueOrgSlug(orgName: string): Promise<string> {
+    const base = orgName
+      .toLowerCase()
+      .trim()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .replace(/^user-+/, 'org-') // never collide with personal-org convention
+      .slice(0, 40);
+
+    let candidate = base.length >= 3 ? base : `org-${nanoid(6).toLowerCase()}`;
+
+    // Ensure uniqueness; append a short random suffix on collision.
+    // Bounded loop avoids any chance of spinning forever.
+    for (let i = 0; i < 6; i++) {
+      const existing = await this.prisma.organization.findUnique({ where: { slug: candidate } });
+      if (!existing) return candidate;
+      const suffix = nanoid(5).toLowerCase();
+      candidate = `${base.slice(0, 34)}-${suffix}`;
+    }
+    // Final fallback: guaranteed-unique random slug.
+    return `org-${nanoid(12).toLowerCase()}`;
+  }
+
+  /**
+   * Create a brand-new organization owned by `userId`.
+   *
+   * Mirrors {@link createDefaultOrganizationForUser} (org + OWNER member +
+   * OrganizationBilling trial + trial Subscription, reusing the user's existing
+   * BillingCustomer) but is used for ADDITIONAL orgs created from the UI, so it
+   * does NOT seed a signup credit (that would let users farm free credits by
+   * spinning up orgs).
+   */
+  async createOrganizationForUser(params: { userId: string; orgName: string }): Promise<Organization> {
+    const { userId, orgName } = params;
+
+    const orgId = nanoid();
+    const memberId = nanoid();
+    const billingId = nanoid();
+    const subscriptionId = nanoid();
+    const orgSlug = await this.generateUniqueOrgSlug(orgName);
+    const now = new Date();
+
+    // ADDITIONAL orgs get NO free trial — the owner must subscribe before the
+    // org can deploy or do anything. We still create an OrganizationBilling +
+    // a placeholder Subscription in status INACTIVE (no trial fields) so the
+    // subscribe flow has a row to CONVERT (never creating a duplicate) and the
+    // deploy gate has a definitive non-entitled status to block on.
+    const defaultPlan = await this.prisma.subscriptionPlan.findFirst({
+      where: { isActive: true },
+      orderBy: { basePricePerSeat: 'asc' },
+    });
+    if (!defaultPlan) {
+      throw new Error('No active subscription plan found. Run: npm run db:seed');
+    }
+
+    // Get-or-create the user's BillingCustomer race-safely (upsert avoids the
+    // TOCTOU P2002 crash on concurrent org creation).
+    const billingCustomer = await this.prisma.billingCustomer.upsert({
+      where: { userId },
+      create: { id: nanoid(), userId },
+      update: {},
+    });
+    const billingCustomerId = billingCustomer.id;
+
+    const operations: Prisma.PrismaPromise<any>[] = [
+      this.prisma.organization.create({
+        data: { id: orgId, slug: orgSlug, name: orgName },
+      }),
+      this.prisma.organizationMember.create({
+        data: { id: memberId, organizationId: orgId, userId, role: 'OWNER' },
+      }),
+      this.prisma.organizationBilling.create({
+        data: {
+          id: billingId,
+          organizationId: orgId,
+          // No trial — added orgs must subscribe.
+          trialConverted: false,
+        },
+      }),
+      this.prisma.subscription.create({
+        data: {
+          id: subscriptionId,
+          customerId: billingCustomerId,
+          orgBillingId: billingId,
+          planId: defaultPlan.id,
+          status: 'INACTIVE',
+          seats: 1,
+          currentPeriodStart: now,
+          currentPeriodEnd: now,
+        },
+      }),
+    ];
+
+    // Note: the array form of $transaction does not accept a `timeout` option
+    // (that is interactive-transaction only), so it is intentionally omitted.
+    const results = await this.prisma.$transaction(operations);
+    const org = results[0] as Awaited<ReturnType<typeof this.prisma.organization.create>>;
 
     return {
       id: org.id,
@@ -2148,7 +2267,17 @@ export class DatabaseService {
     };
   }
 
-  async updateSubscription(id: string, updates: Partial<Subscription>): Promise<void> {
+  async updateSubscription(
+    id: string,
+    // The detach/clear fields accept `null` to explicitly null the column
+    // (e.g. cancellation clears stripe_subscription_id / cancel_at).
+    updates: Partial<Omit<Subscription, 'stripe_subscription_id' | 'cancel_at' | 'canceled_at' | 'trial_end'>> & {
+      stripe_subscription_id?: string | null;
+      cancel_at?: number | null;
+      canceled_at?: number | null;
+      trial_end?: number | null;
+    },
+  ): Promise<void> {
     const data: Record<string, unknown> = {};
 
     if (updates.status !== undefined) data.status = updates.status;
@@ -2245,7 +2374,10 @@ export class DatabaseService {
     const result = await this.prisma.subscription.findFirst({
       where: {
         orgBillingId,
-        status: { in: ['ACTIVE', 'TRIALING', 'TRIAL_EXPIRED', 'SUSPENDED', 'PAST_DUE'] },
+        // Excludes only CANCELED (terminal). INACTIVE/INCOMPLETE included so the
+        // subscribe flow finds and CONVERTS the org's existing row instead of
+        // creating a duplicate live subscription.
+        status: { in: ['ACTIVE', 'TRIALING', 'TRIAL_EXPIRED', 'SUSPENDED', 'PAST_DUE', 'INACTIVE', 'INCOMPLETE', 'UNPAID'] },
       },
       orderBy: { createdAt: 'desc' },
     });
@@ -2332,6 +2464,26 @@ export class DatabaseService {
     status?: SubscriptionStatus;
     trialEnd?: Date | null;
   }): Promise<void> {
+    // H8 guard: never silently overwrite a DIFFERENT Stripe subscription id.
+    // Two distinct checkout.session.completed events (or a retry that linked a
+    // new sub) would otherwise orphan the first Stripe subscription, which keeps
+    // charging the card untracked.
+    if (updates.stripeSubscriptionId) {
+      const existing = await this.prisma.subscription.findUnique({
+        where: { id: subscriptionId },
+        select: { stripeSubscriptionId: true },
+      });
+      if (
+        existing?.stripeSubscriptionId &&
+        existing.stripeSubscriptionId !== updates.stripeSubscriptionId
+      ) {
+        throw new Error(
+          `Subscription ${subscriptionId} already linked to Stripe sub ${existing.stripeSubscriptionId}; ` +
+            `refusing to overwrite with ${updates.stripeSubscriptionId}`,
+        );
+      }
+    }
+
     await this.prisma.subscription.update({
       where: { id: subscriptionId },
       data: {
@@ -2417,7 +2569,7 @@ export class DatabaseService {
     const sub = await this.prisma.subscription.findFirst({
       where: {
         orgBillingId: orgBilling.id,
-        status: { in: ['ACTIVE', 'TRIALING', 'TRIAL_EXPIRED', 'SUSPENDED', 'PAST_DUE', 'CANCELED'] },
+        status: { in: ['ACTIVE', 'TRIALING', 'TRIAL_EXPIRED', 'SUSPENDED', 'PAST_DUE', 'CANCELED', 'INACTIVE', 'INCOMPLETE', 'UNPAID'] },
       },
       orderBy: { createdAt: 'desc' },
     });

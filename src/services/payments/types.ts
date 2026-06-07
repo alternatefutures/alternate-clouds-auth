@@ -177,6 +177,39 @@ export interface SubscriptionChangePreview {
   endingBalanceCents: number; // customer balance after this change (negative = credit)
 }
 
+/**
+ * Charge a customer's saved card immediately for a one-off amount, outside any
+ * subscription cycle. Used to bill an added seat during a subscription-wide
+ * trial: a Stripe `quantity` change during a trial does NOT charge, so the
+ * prorated seat cost is billed here and the quantity is bumped with
+ * `proration_behavior: 'none'`. Appears in the customer's Invoices tab.
+ */
+export interface ChargeOneOffInvoiceInput {
+  customerId: string;
+  amountCents: number; // > 0
+  currency: string;
+  description: string;
+  metadata?: Record<string, string>;
+  idempotencyKey?: string; // dedupes the invoice-item + invoice + pay calls
+  // Explicit PM to charge. If omitted, resolves customer default → first card.
+  // Standalone invoices do NOT inherit the subscription's default PM.
+  paymentMethodId?: string;
+}
+
+/**
+ * Apply a credit to the customer's Stripe balance (a negative balance
+ * transaction). Stripe auto-applies it against the customer's next invoice.
+ * Used to refund a removed seat's prorated remainder during a trial.
+ */
+export interface CreditCustomerBalanceInput {
+  customerId: string;
+  amountCents: number; // > 0 (credited as a negative balance transaction)
+  currency: string;
+  description: string;
+  metadata?: Record<string, string>;
+  idempotencyKey?: string;
+}
+
 // Transfer types for Connect payouts
 export interface Transfer {
   id: string;
@@ -218,6 +251,14 @@ export interface CheckoutSession {
 
 export interface CancelSubscriptionInput {
   immediately?: boolean;
+  /**
+   * Credit the unused portion of the current paid period back to the customer
+   * balance (Stripe `prorations`). Only meaningful on immediate cancel of a
+   * PAID period — a trial has nothing to prorate. Defaults to false.
+   */
+  prorate?: boolean;
+  /** Invoice the proration immediately so the credit lands on the balance now (Stripe `invoice_now`). */
+  invoiceNow?: boolean;
 }
 
 export interface CreateRefundInput {
@@ -266,6 +307,14 @@ export interface PaymentProvider {
   updateSubscription?(subscriptionId: string, input: Partial<CreateSubscriptionInput>): Promise<ExternalSubscription>;
   cancelSubscription?(subscriptionId: string, input?: CancelSubscriptionInput): Promise<ExternalSubscription>;
   previewSubscriptionChange?(input: PreviewSubscriptionChangeInput): Promise<SubscriptionChangePreview>;
+
+  // One-off / out-of-cycle billing (optional) — used for trial-seat proration.
+  chargeOneOffInvoice?(input: ChargeOneOffInvoiceInput): Promise<ExternalInvoice>;
+  creditCustomerBalance?(input: CreditCustomerBalanceInput): Promise<{ endingBalanceCents: number }>;
+  // Copy a subscription's payment method onto the customer's invoice default so
+  // standalone/one-off invoices (e.g. trial seat charges) and renewals collect.
+  // No-op if the customer already has a default PM. Returns true if it set one.
+  syncSubscriptionDefaultPaymentMethodToCustomer?(subscriptionId: string): Promise<boolean>;
 
   // Invoices (optional)
   getInvoice?(invoiceId: string): Promise<ExternalInvoice | null>;

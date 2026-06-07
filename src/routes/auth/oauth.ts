@@ -263,19 +263,26 @@ app.get('/callback/:provider', async (c) => {
         is_primary: 1,
       });
 
-      // Create default organization for new user
+      // Create default organization for new user. Wrapped so a failure here is
+      // logged explicitly (the user + auth method already committed above —
+      // failing silently would orphan the account with no workspace).
       const orgSlug = `user-${user.id.slice(0, 8)}`;
       const orgName = oauthUserInfo.name || oauthUserInfo.email?.split('@')[0] || 'My Organization';
-      await dbService.createDefaultOrganizationForUser({
-        orgId: nanoid(),
-        memberId: nanoid(),
-        billingId: nanoid(),
-        billingCustomerId: nanoid(),
-        subscriptionId: nanoid(),
-        userId: user.id,
-        orgSlug,
-        orgName: `${orgName}'s Org`,
-      });
+      try {
+        await dbService.createDefaultOrganizationForUser({
+          orgId: nanoid(),
+          memberId: nanoid(),
+          billingId: nanoid(),
+          billingCustomerId: nanoid(),
+          subscriptionId: nanoid(),
+          userId: user.id,
+          orgSlug,
+          orgName: `${orgName}'s Org`,
+        });
+      } catch (orgErr) {
+        console.error(`[oauth signup] default org creation failed for user ${user.id} — account has no workspace:`, orgErr);
+        throw orgErr;
+      }
 
       audit(dbService.prismaClient, {
         category: 'user',

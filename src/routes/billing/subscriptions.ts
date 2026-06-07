@@ -13,6 +13,7 @@ import { z } from 'zod';
 import { authMiddleware, requireAuthUser } from '../../middleware/auth';
 import { dbService, SubscriptionPlan } from '../../services/db.service';
 import { getDefaultProvider } from '../../services/payments';
+import { disableOrg } from '../../services/seatBilling.service';
 import type { CreateSubscriptionInput, CreateCheckoutSessionInput } from '../../services/payments/types';
 
 const app = new Hono();
@@ -251,7 +252,7 @@ app.post('/', async (c) => {
       if (billing) {
         orgBillingId = billing.id;
         const sub = await dbService.getSubscriptionByOrgBillingId(billing.id);
-        if (sub && ['TRIALING', 'TRIAL_EXPIRED', 'SUSPENDED'].includes(sub.status)) {
+        if (sub && ['TRIALING', 'TRIAL_EXPIRED', 'SUSPENDED', 'INACTIVE'].includes(sub.status)) {
           existingTrialSub = sub;
         }
       }
@@ -269,7 +270,7 @@ app.post('/', async (c) => {
         if (!orgBillingId) orgBillingId = billing.id;
 
         const sub = await dbService.getSubscriptionByOrgBillingId(billing.id);
-        if (sub && ['TRIALING', 'TRIAL_EXPIRED', 'SUSPENDED'].includes(sub.status)) {
+        if (sub && ['TRIALING', 'TRIAL_EXPIRED', 'SUSPENDED', 'INACTIVE'].includes(sub.status)) {
           existingTrialSub = sub;
           orgBillingId = billing.id;
           break;
@@ -465,8 +466,6 @@ app.post('/:id/cancel', async (c) => {
   try {
     const user = requireAuthUser(c);
     const subscriptionId = c.req.param('id');
-    const body = await c.req.json().catch(() => ({}));
-    const immediately = body.immediately === true;
 
     const subscription = await dbService.getSubscriptionById(subscriptionId);
     if (!subscription) {
@@ -491,45 +490,60 @@ app.post('/:id/cancel', async (c) => {
       }
     }
 
-    // Cancel in provider
-    if (subscription.stripe_subscription_id) {
-      const provider = getDefaultProvider();
-      if (provider.cancelSubscription) {
-        await provider.cancelSubscription(subscription.stripe_subscription_id, { immediately });
-      }
-    }
+    const provider = getDefaultProvider();
 
-    // If the subscription is in an active trial, restore to TRIALING (detach Stripe sub)
-    // instead of CANCELED so the trial period survives and the scheduler can still
-    // transition TRIALING → TRIAL_EXPIRED → SUSPENDED when the trial actually ends.
+    // A subscription still inside its free-trial window reverts to the trial
+    // rather than hard-canceling.
     const hasActiveTrial = subscription.trial_end && subscription.trial_end > Date.now()
       && (subscription.status === 'TRIALING' || subscription.status === 'ACTIVE' || subscription.status === 'INCOMPLETE');
 
     if (hasActiveTrial && subscription.org_billing_id) {
+      // (B) Cancel during trial: detach the Stripe subscription and revert to
+      // TRIALING so the trial survives and the scheduler still runs
+      // TRIALING → TRIAL_EXPIRED → SUSPENDED on the original schedule. Nothing
+      // was charged yet, so there is nothing to credit.
+      if (subscription.stripe_subscription_id && provider.cancelSubscription) {
+        await provider.cancelSubscription(subscription.stripe_subscription_id, { immediately: true });
+      }
       await dbService.updateSubscription(subscriptionId, {
         status: 'TRIALING',
         stripe_subscription_id: null,
         canceled_at: null,
         cancel_at: null,
       });
-
-      if (subscription.org_billing_id) {
-        await dbService.updateOrganizationBilling(subscription.org_billing_id, {
-          trial_converted: false,
+      await dbService.updateOrganizationBilling(subscription.org_billing_id, {
+        trial_converted: false,
+      });
+    } else {
+      // (A) Cancel a paid (non-trial) subscription: cancel immediately, credit
+      // the unused paid time to the Stripe customer balance (prorate +
+      // invoice_now), then DISABLE the org — remove non-owner members and stop
+      // all deployments. The org becomes a locked shell the owner recovers by
+      // re-subscribing. (Per product decision: immediate + credit, not period-end.)
+      if (subscription.stripe_subscription_id && provider.cancelSubscription) {
+        await provider.cancelSubscription(subscription.stripe_subscription_id, {
+          immediately: true,
+          prorate: true,
+          invoiceNow: true,
         });
       }
-    } else {
-      const updates: Record<string, unknown> = {
-        status: immediately ? 'CANCELED' : subscription.status,
+
+      await dbService.updateSubscription(subscriptionId, {
+        status: 'CANCELED',
         canceled_at: Date.now(),
-        stripe_subscription_id: immediately ? null : subscription.stripe_subscription_id,
-      };
+        cancel_at: null,
+        stripe_subscription_id: null,
+        seats: 1,
+      });
 
-      if (!immediately) {
-        updates.cancel_at = subscription.current_period_end;
+      if (subscription.org_billing_id) {
+        const orgBilling = await dbService.getOrganizationBillingById(subscription.org_billing_id);
+        if (orgBilling) {
+          await disableOrg(orgBilling.organization_id).catch((err) =>
+            console.error(`[cancel] disableOrg failed for org ${orgBilling.organization_id}:`, err),
+          );
+        }
       }
-
-      await dbService.updateSubscription(subscriptionId, updates);
     }
 
     const updatedSubscription = await dbService.getSubscriptionById(subscriptionId);
@@ -1116,6 +1130,16 @@ app.post('/checkout/confirm', async (c) => {
         current_period_start: now,
         current_period_end: periodEnd.getTime(),
       });
+    }
+
+    // H1: mirror the saved card onto the customer's invoice default so renewal
+    // and one-off (trial seat) invoices collect. Best-effort, non-fatal.
+    try {
+      if ((provider as any).syncSubscriptionDefaultPaymentMethodToCustomer) {
+        await (provider as any).syncSubscriptionDefaultPaymentMethodToCustomer(stripeSubscriptionId);
+      }
+    } catch (pmErr) {
+      console.error('Failed to set customer default payment method (non-fatal):', pmErr);
     }
 
     console.log(`Checkout confirmed: subscription ${stripeSubscriptionId} for user ${user.userId}, plan ${plan.name}`);
