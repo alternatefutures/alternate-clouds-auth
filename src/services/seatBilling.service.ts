@@ -17,34 +17,15 @@
 
 import { dbService } from './db.service';
 import { getDefaultProvider } from './payments';
+import { revokePlatformMembership } from './platformSync.service';
 import { suspendOrgDeployments } from './trialScheduler';
+import { computeProrationCents } from '../utils/billing';
 
 export interface SyncSeatsResult {
   synced: boolean;
   seats: number;
   reason: string;
   stripeUpdated: boolean;
-}
-
-/**
- * Day-based proration for the remaining current period (Slack formula). For a
- * TRIALING subscription the current period IS the trial window, so this yields
- * the prorated cost of a seat for the trial remainder. Mirrors the formula in
- * `GET /organizations/:id/seats/preview` exactly so the charge matches the
- * estimate shown to the user. `seatDelta` should be positive.
- */
-function computeTrialProrationCents(
-  sub: { current_period_start: number; current_period_end: number },
-  basePricePerSeatCents: number,
-  seatDelta: number,
-): number {
-  const start = sub.current_period_start;
-  const end = sub.current_period_end;
-  const now = Date.now();
-  const totalMs = Math.max(1, end - start);
-  const remainingMs = Math.max(0, end - now);
-  const fractionRemaining = Math.min(1, remainingMs / totalMs);
-  return Math.round(basePricePerSeatCents * seatDelta * fractionRemaining);
 }
 
 /**
@@ -99,7 +80,7 @@ export async function syncOrgSeats(
 
           if (basePricePerSeatCents > 0 && customerId) {
             if (seatDelta > 0 && provider.chargeOneOffInvoice) {
-              const amountCents = computeTrialProrationCents(subscription, basePricePerSeatCents, seatDelta);
+              const amountCents = computeProrationCents(subscription, basePricePerSeatCents, seatDelta);
               if (amountCents > 0) {
                 await provider.chargeOneOffInvoice({
                   customerId,
@@ -117,7 +98,7 @@ export async function syncOrgSeats(
                 });
               }
             } else if (seatDelta < 0 && provider.creditCustomerBalance) {
-              const amountCents = computeTrialProrationCents(subscription, basePricePerSeatCents, -seatDelta);
+              const amountCents = computeProrationCents(subscription, basePricePerSeatCents, -seatDelta);
               if (amountCents > 0) {
                 await provider.creditCustomerBalance({
                   customerId,
@@ -250,9 +231,28 @@ export async function canOrgInviteMembers(
  */
 export async function disableOrg(organizationId: string): Promise<void> {
   try {
-    const removed = await dbService.removeNonOwnerMembers(organizationId);
-    if (removed > 0) {
-      console.log(`[disableOrg] removed ${removed} non-owner member(s) from org ${organizationId}`);
+    const removedUserIds = await dbService.removeNonOwnerMembers(organizationId);
+    if (removedUserIds.length > 0) {
+      console.log(`[disableOrg] removed ${removedUserIds.length} non-owner member(s) from org ${organizationId}`);
+
+      // Drop each removed member's CACHED platform membership in cloud-api.
+      // Without this, cloud-api's auth fast-path keeps trusting its local
+      // OrganizationMember row and the removed user retains access to the org's
+      // projects/deployments/shell after cancellation. Best-effort per user.
+      await Promise.all(
+        removedUserIds.map((userId) =>
+          revokePlatformMembership(organizationId, userId).catch((err) =>
+            console.error(`[disableOrg] failed to revoke platform membership for user ${userId} org ${organizationId}:`, err),
+          ),
+        ),
+      );
+
+      // One final seat reconcile after the bulk removal so Stripe quantity +
+      // the local seat count settle to the owner-only floor (decision: a single
+      // sync, not one per removed member).
+      await syncOrgSeats(organizationId, { reason: 'org_disabled' }).catch((err) =>
+        console.error(`[disableOrg] final seat sync failed for org ${organizationId}:`, err),
+      );
     }
   } catch (err) {
     console.error(`[disableOrg] failed to remove members for org ${organizationId}:`, err);

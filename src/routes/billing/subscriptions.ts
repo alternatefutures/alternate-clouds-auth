@@ -14,6 +14,7 @@ import { authMiddleware, requireAuthUser } from '../../middleware/auth';
 import { dbService, SubscriptionPlan } from '../../services/db.service';
 import { getDefaultProvider } from '../../services/payments';
 import { disableOrg } from '../../services/seatBilling.service';
+import { computePeriodEnd } from '../../utils/billing';
 import type { CreateSubscriptionInput, CreateCheckoutSessionInput } from '../../services/payments/types';
 
 const app = new Hono();
@@ -55,9 +56,28 @@ const changePlanSchema = z.object({
 type BillingAuthResult = { ok: true } | { ok: false; status: 400 | 403 | 404; error: string };
 
 /**
+ * Require the caller be OWNER/ADMIN of an org (by org id). Single source of
+ * truth for the org-admin membership guard reused by the subscribe, cancel,
+ * reactivate, and seat-change billing endpoints so the rule never drifts.
+ */
+async function requireOrgBillingAdmin(
+  organizationId: string,
+  userId: string,
+): Promise<BillingAuthResult> {
+  const member = await dbService.getOrganizationMember(organizationId, userId);
+  if (!member) {
+    return { ok: false, status: 403, error: 'Not a member of this organization' };
+  }
+  if (member.role !== 'OWNER' && member.role !== 'ADMIN') {
+    return { ok: false, status: 403, error: 'OWNER or ADMIN role required for billing changes' };
+  }
+  return { ok: true };
+}
+
+/**
  * Authorize a billing-mutating action on a subscription. For org subscriptions
  * the caller must be OWNER/ADMIN; for personal subscriptions they must own the
- * billing customer. Mirrors the inline guards used by cancel + seats.
+ * billing customer.
  */
 async function authorizeSubscriptionBilling(
   userId: string,
@@ -66,13 +86,7 @@ async function authorizeSubscriptionBilling(
   if (subscription.org_billing_id) {
     const orgBilling = await dbService.getOrganizationBillingById(subscription.org_billing_id);
     if (orgBilling) {
-      const member = await dbService.getOrganizationMember(orgBilling.organization_id, userId);
-      if (!member) {
-        return { ok: false, status: 403, error: 'Not a member of this organization' };
-      }
-      if (member.role !== 'OWNER' && member.role !== 'ADMIN') {
-        return { ok: false, status: 403, error: 'OWNER or ADMIN role required for billing changes' };
-      }
+      return requireOrgBillingAdmin(orgBilling.organization_id, userId);
     }
     return { ok: true };
   }
@@ -202,29 +216,6 @@ app.post('/', async (c) => {
       return c.json({ error: 'Customer not found. Create customer first.' }, 404);
     }
 
-    // Check for existing ACTIVE or INCOMPLETE subscription
-    const existingActive = await dbService.getActiveSubscriptionByCustomerId(customer.id);
-    if (existingActive) {
-      if (existingActive.status === 'INCOMPLETE') {
-        // Stale payment attempt — cancel the old Stripe sub and let them retry
-        if (existingActive.stripe_subscription_id) {
-          try {
-            const provider = getDefaultProvider();
-            if (provider.cancelSubscription) {
-              await provider.cancelSubscription(existingActive.stripe_subscription_id, { immediately: true });
-            }
-          } catch (cancelErr) {
-            console.error('Failed to cancel stale Stripe subscription:', cancelErr);
-          }
-        }
-        await dbService.updateSubscription(existingActive.id, { status: 'CANCELED', canceled_at: Date.now() });
-      } else if (!existingActive.org_billing_id) {
-        await dbService.updateSubscription(existingActive.id, { status: 'CANCELED', canceled_at: Date.now() });
-      } else {
-        return c.json({ error: 'Already have an active subscription. Cancel it first.' }, 400);
-      }
-    }
-
     const plan = await dbService.getSubscriptionPlanById(data.planId);
     if (!plan) {
       return c.json({ error: 'Plan not found' }, 404);
@@ -234,64 +225,102 @@ app.post('/', async (c) => {
       return c.json({ error: 'This plan is no longer available' }, 400);
     }
 
-    // Resolve org billing and look for a trial/expired/suspended subscription to convert
+    // Resolve the TARGET org's billing + its single subscription row. Every org
+    // is created with a subscription row (personal = TRIALING, added = INACTIVE),
+    // so the normal path CONVERTS that one row — it never creates a duplicate.
+    // The existing-active guard is scoped to the TARGET org (NOT the customer):
+    // a user who already has one active org subscription can still subscribe a
+    // second org. (Previously a customer-wide guard wrongly blocked that.)
     const orgs = await dbService.getOrganizationsByUserId(user.userId);
-    let existingTrialSub: Awaited<ReturnType<typeof dbService.getSubscriptionByOrgBillingId>> | null = null;
+    let existingSub: Awaited<ReturnType<typeof dbService.getSubscriptionByOrgBillingId>> | null = null;
     let orgBillingId: string | null = null;
 
-    // If frontend specified an orgId, resolve that org's billing first
     if (data.orgId) {
-      const member = await dbService.getOrganizationMember(data.orgId, user.userId);
-      if (!member) {
-        return c.json({ error: 'Not a member of this organization' }, 403);
-      }
-      if (member.role !== 'OWNER' && member.role !== 'ADMIN') {
-        return c.json({ error: 'OWNER or ADMIN role required for billing changes' }, 403);
+      const authz = await requireOrgBillingAdmin(data.orgId, user.userId);
+      if (!authz.ok) {
+        return c.json({ error: authz.error }, authz.status);
       }
       const billing = await dbService.getOrganizationBillingByOrgId(data.orgId);
       if (billing) {
         orgBillingId = billing.id;
-        const sub = await dbService.getSubscriptionByOrgBillingId(billing.id);
-        if (sub && ['TRIALING', 'TRIAL_EXPIRED', 'SUSPENDED', 'INACTIVE'].includes(sub.status)) {
-          existingTrialSub = sub;
-        }
+        existingSub = await dbService.getSubscriptionByOrgBillingId(billing.id);
       }
     }
 
-    // Fallback: scan user orgs (only those where user is OWNER or ADMIN)
+    // Fallback (no explicit orgId): pick the user's first OWNER/ADMIN org,
+    // preferring one whose subscription still needs activating.
     if (!orgBillingId) {
       for (const org of orgs) {
-        const member = await dbService.getOrganizationMember(org.id, user.userId);
-        if (!member || (member.role !== 'OWNER' && member.role !== 'ADMIN')) continue;
+        const authz = await requireOrgBillingAdmin(org.id, user.userId);
+        if (!authz.ok) continue;
 
         const billing = await dbService.getOrganizationBillingByOrgId(org.id);
         if (!billing) continue;
 
-        if (!orgBillingId) orgBillingId = billing.id;
-
         const sub = await dbService.getSubscriptionByOrgBillingId(billing.id);
-        if (sub && ['TRIALING', 'TRIAL_EXPIRED', 'SUSPENDED', 'INACTIVE'].includes(sub.status)) {
-          existingTrialSub = sub;
+        if (!orgBillingId) {
+          orgBillingId = billing.id;
+          existingSub = sub;
+        }
+        if (sub && sub.status !== 'ACTIVE') {
+          existingSub = sub;
           orgBillingId = billing.id;
           break;
         }
       }
     }
 
+    // Guard: the TARGET org already has a live, paid subscription. Re-subscribing
+    // is not allowed here — use change-plan / seat updates instead.
+    if (existingSub && existingSub.status === 'ACTIVE' && existingSub.stripe_subscription_id) {
+      return c.json({ error: 'This organization already has an active subscription.' }, 400);
+    }
+
     const isPaidPlan = plan.base_price_per_seat > 0;
-    const isActiveTrial = existingTrialSub?.status === 'TRIALING'
-      && existingTrialSub.trial_end
-      && existingTrialSub.trial_end > Date.now();
+    const isActiveTrial = existingSub?.status === 'TRIALING'
+      && !!existingSub.trial_end
+      && existingSub.trial_end > Date.now();
+    // Only a PAID subscribe preserves the trial (Stripe SetupIntent, charge at
+    // trial end). A free plan during a trial converts straight to ACTIVE.
+    const preserveTrial = isPaidPlan && isActiveTrial;
 
     let stripeSubscriptionId: string | undefined;
     let clientSecret: string | undefined;
     const now = Date.now();
-    const periodEnd = new Date(now);
+    const periodEndMs = computePeriodEnd(now, plan.billing_interval);
 
-    if (plan.billing_interval === 'YEARLY') {
-      periodEnd.setFullYear(periodEnd.getFullYear() + 1);
-    } else {
-      periodEnd.setMonth(periodEnd.getMonth() + 1);
+    // Free plan → ACTIVE now. Paid + active trial → keep TRIALING (the owner's
+    // trial survives; Stripe charges the saved card at trial end). Paid + no
+    // trial → INCOMPLETE until the first payment confirms via webhook.
+    const initialStatus = !isPaidPlan ? 'ACTIVE' : (preserveTrial ? 'TRIALING' : 'INCOMPLETE');
+
+    // Claim the org's single live subscription row BEFORE calling Stripe so the
+    // Stripe idempotency key can be derived from a stable row id. Two concurrent
+    // subscribe clicks converge on ONE row — the partial unique index makes the
+    // loser's insert fail with P2002, so it reads the winner — and therefore on
+    // ONE Stripe subscription. A genuine re-subscribe AFTER a cancel gets a
+    // fresh row id (the old row is terminal/CANCELED), hence a fresh Stripe sub
+    // (avoids Stripe replaying the 24h-cached canceled sub for an identical key).
+    let workingSub = existingSub;
+    if (!workingSub && orgBillingId) {
+      try {
+        workingSub = await dbService.createSubscription({
+          id: nanoid(),
+          customer_id: customer.id,
+          org_billing_id: orgBillingId,
+          plan_id: plan.id,
+          status: initialStatus,
+          seats: data.seats,
+          current_period_start: now,
+          current_period_end: periodEndMs,
+        });
+      } catch (createErr) {
+        if ((createErr as { code?: string }).code === 'P2002') {
+          workingSub = await dbService.getSubscriptionByOrgBillingId(orgBillingId);
+        } else {
+          throw createErr;
+        }
+      }
     }
 
     if (isPaidPlan) {
@@ -318,16 +347,22 @@ app.post('/', async (c) => {
         customer = (await dbService.getBillingCustomerByUserId(user.userId))!;
       }
 
-      // If retrying during trial and a stale Stripe sub exists, cancel it first
-      if (isActiveTrial && existingTrialSub!.stripe_subscription_id) {
+      // The row we're about to (re)use may carry a stale Stripe subscription (an
+      // abandoned INCOMPLETE attempt, or a trial retry). Cancel it and detach it
+      // locally before linking the new one, so we never orphan a live Stripe sub
+      // and so convertSubscriptionToActive's "refuse to overwrite a different
+      // Stripe id" guard doesn't trip.
+      if (workingSub?.stripe_subscription_id) {
         try {
           const provider = getDefaultProvider();
           if (provider.cancelSubscription) {
-            await provider.cancelSubscription(existingTrialSub!.stripe_subscription_id, { immediately: true });
+            await provider.cancelSubscription(workingSub.stripe_subscription_id, { immediately: true });
           }
         } catch (cancelErr) {
-          console.error('Failed to cancel stale Stripe subscription on trial retry:', cancelErr);
+          console.error('Failed to cancel stale Stripe subscription before re-subscribe:', cancelErr);
         }
+        await dbService.updateSubscription(workingSub.id, { stripe_subscription_id: null });
+        workingSub = { ...workingSub, stripe_subscription_id: undefined };
       }
 
       const provider = getDefaultProvider();
@@ -340,13 +375,16 @@ app.post('/', async (c) => {
         priceId: plan.stripe_price_id,
         quantity: data.seats,
         paymentMethodId: data.paymentMethodId,
-        metadata: { userId: user.userId },
+        metadata: { userId: user.userId, orgBillingId: orgBillingId ?? '' },
+        // Idempotency keyed on the claimed row id: concurrent clicks share it
+        // (→ one Stripe sub); a post-cancel re-subscribe has a new row (→ new sub).
+        idempotencyKey: workingSub ? `subscribe:${workingSub.id}` : undefined,
       };
 
       // Active trial: pass trial_end → Stripe creates SetupIntent (save card, charge later)
       // Post-trial or no trial: Stripe creates PaymentIntent (charge now)
-      if (isActiveTrial) {
-        createSubInput.trialEnd = Math.floor(existingTrialSub!.trial_end! / 1000);
+      if (preserveTrial) {
+        createSubInput.trialEnd = Math.floor(workingSub!.trial_end! / 1000);
       }
 
       const externalSub = await provider.createSubscription(createSubInput);
@@ -359,49 +397,61 @@ app.post('/', async (c) => {
       }
     }
 
-    // Post-trial + paid: INCOMPLETE until payment confirmed via webhook
-    // Free plan: ACTIVE immediately
-    const initialStatus = isPaidPlan ? 'INCOMPLETE' : 'ACTIVE';
     let subscriptionResult;
 
-    if (existingTrialSub && orgBillingId) {
-      await dbService.convertSubscriptionToActive(existingTrialSub.id, {
-        planId: plan.id,
-        seats: data.seats,
-        stripeSubscriptionId,
-        currentPeriodStart: new Date(now),
-        currentPeriodEnd: periodEnd,
-        status: initialStatus,
-      });
+    if (workingSub) {
+      if (preserveTrial) {
+        // Mid-trial subscribe: link the Stripe sub + plan/seats but PRESERVE the
+        // trial (status TRIALING, trial_end untouched). Mirrors the Checkout
+        // path. Converting-and-clearing here would wipe the trial and make a
+        // later cancel mis-classify the trial as a paid period.
+        await dbService.updateSubscription(workingSub.id, {
+          stripe_subscription_id: stripeSubscriptionId,
+          plan_id: plan.id,
+          seats: data.seats,
+          status: 'TRIALING',
+        });
+      } else {
+        await dbService.convertSubscriptionToActive(workingSub.id, {
+          planId: plan.id,
+          seats: data.seats,
+          stripeSubscriptionId,
+          currentPeriodStart: new Date(now),
+          currentPeriodEnd: new Date(periodEndMs),
+          status: initialStatus,
+        });
+      }
 
-      if (!isPaidPlan) {
+      if (!isPaidPlan && orgBillingId) {
         await dbService.updateOrganizationBilling(orgBillingId, {
           trial_converted: true,
         });
       }
 
       subscriptionResult = {
-        id: existingTrialSub.id,
+        id: workingSub.id,
         plan: plan.name,
         billingInterval: plan.billing_interval,
         status: initialStatus,
         seats: data.seats,
         basePricePerSeat: plan.base_price_per_seat,
         currentPeriodStart: now,
-        currentPeriodEnd: periodEnd.getTime(),
-        createdAt: existingTrialSub.created_at,
+        currentPeriodEnd: periodEndMs,
+        createdAt: workingSub.created_at,
       };
     } else {
+      // No org context at all (personal/legacy subscription). Create a
+      // standalone row now that the Stripe sub (if any) exists.
       const subscription = await dbService.createSubscription({
         id: nanoid(),
         customer_id: customer.id,
-        org_billing_id: orgBillingId ?? undefined,
+        org_billing_id: undefined,
         plan_id: plan.id,
         status: initialStatus,
         seats: data.seats,
         stripe_subscription_id: stripeSubscriptionId,
         current_period_start: now,
-        current_period_end: periodEnd.getTime(),
+        current_period_end: periodEndMs,
       });
 
       subscriptionResult = {
@@ -467,27 +517,26 @@ app.post('/:id/cancel', async (c) => {
     const user = requireAuthUser(c);
     const subscriptionId = c.req.param('id');
 
+    // immediately=false (the web-app default) → cancel at period end: the org
+    // keeps access + members until the paid period runs out, then the
+    // subscription.deleted webhook tears it down. immediately=true → cancel now,
+    // credit the unused time, and disable the org right away.
+    let immediately = false;
+    try {
+      const body = await c.req.json();
+      immediately = body?.immediately === true;
+    } catch {
+      // No JSON body → keep the safe default (end of period).
+    }
+
     const subscription = await dbService.getSubscriptionById(subscriptionId);
     if (!subscription) {
       return c.json({ error: 'Subscription not found' }, 404);
     }
 
-    if (subscription.org_billing_id) {
-      const orgBilling = await dbService.getOrganizationBillingById(subscription.org_billing_id);
-      if (orgBilling) {
-        const member = await dbService.getOrganizationMember(orgBilling.organization_id, user.userId);
-        if (!member) {
-          return c.json({ error: 'Not a member of this organization' }, 403);
-        }
-        if (member.role !== 'OWNER' && member.role !== 'ADMIN') {
-          return c.json({ error: 'OWNER or ADMIN role required for billing changes' }, 403);
-        }
-      }
-    } else {
-      const customer = await dbService.getBillingCustomerByUserId(user.userId);
-      if (!customer || subscription.customer_id !== customer.id) {
-        return c.json({ error: 'Subscription not found' }, 404);
-      }
+    const cancelAuthz = await authorizeSubscriptionBilling(user.userId, subscription);
+    if (!cancelAuthz.ok) {
+      return c.json({ error: cancelAuthz.error }, cancelAuthz.status);
     }
 
     const provider = getDefaultProvider();
@@ -496,6 +545,14 @@ app.post('/:id/cancel', async (c) => {
     // rather than hard-canceling.
     const hasActiveTrial = subscription.trial_end && subscription.trial_end > Date.now()
       && (subscription.status === 'TRIALING' || subscription.status === 'ACTIVE' || subscription.status === 'INCOMPLETE');
+
+    // Period-end is only meaningful for a live PAID subscription with a Stripe
+    // sub. A trial, or a row with no Stripe sub, has no paid period to ride out,
+    // so those always take the trial-revert or immediate path.
+    const canCancelAtPeriodEnd = !immediately
+      && !hasActiveTrial
+      && !!subscription.stripe_subscription_id
+      && (subscription.status === 'ACTIVE' || subscription.status === 'PAST_DUE');
 
     if (hasActiveTrial && subscription.org_billing_id) {
       // (B) Cancel during trial: detach the Stripe subscription and revert to
@@ -514,12 +571,33 @@ app.post('/:id/cancel', async (c) => {
       await dbService.updateOrganizationBilling(subscription.org_billing_id, {
         trial_converted: false,
       });
+    } else if (canCancelAtPeriodEnd) {
+      // (C) Cancel at period end: schedule Stripe cancel_at_period_end. The org
+      // stays ACTIVE and members keep access until the paid period runs out;
+      // they keep the time already paid for (no proration credit). The
+      // customer.subscription.deleted webhook marks CANCELED + disables the org
+      // when the period actually ends.
+      let cancelAtMs: number | null = subscription.current_period_end ?? null;
+      if (provider.cancelSubscription) {
+        const external = await provider.cancelSubscription(subscription.stripe_subscription_id!, {
+          immediately: false,
+        });
+        // Stripe's cancel_at is authoritative (seconds → ms). Falls back to our
+        // local period end if Stripe didn't echo one.
+        if (external.cancelAt) cancelAtMs = external.cancelAt * 1000;
+      }
+      await dbService.updateSubscription(subscriptionId, {
+        cancel_at: cancelAtMs,
+        canceled_at: null,
+      });
+      // Status stays ACTIVE; do NOT disableOrg now — members keep access until
+      // the period ends and the webhook fires.
     } else {
-      // (A) Cancel a paid (non-trial) subscription: cancel immediately, credit
-      // the unused paid time to the Stripe customer balance (prorate +
+      // (A) Cancel a paid (non-trial) subscription immediately: cancel now,
+      // credit the unused paid time to the Stripe customer balance (prorate +
       // invoice_now), then DISABLE the org — remove non-owner members and stop
-      // all deployments. The org becomes a locked shell the owner recovers by
-      // re-subscribing. (Per product decision: immediate + credit, not period-end.)
+      // all deployments. The credit lives on the per-user BillingCustomer and is
+      // auto-applied by Stripe to the next invoice when the user re-subscribes.
       if (subscription.stripe_subscription_id && provider.cancelSubscription) {
         await provider.cancelSubscription(subscription.stripe_subscription_id, {
           immediately: true,
@@ -582,22 +660,9 @@ app.put('/:id/seats', async (c) => {
       return c.json({ error: 'Subscription not found' }, 404);
     }
 
-    if (subscription.org_billing_id) {
-      const orgBilling = await dbService.getOrganizationBillingById(subscription.org_billing_id);
-      if (orgBilling) {
-        const member = await dbService.getOrganizationMember(orgBilling.organization_id, user.userId);
-        if (!member) {
-          return c.json({ error: 'Not a member of this organization' }, 403);
-        }
-        if (member.role !== 'OWNER' && member.role !== 'ADMIN') {
-          return c.json({ error: 'OWNER or ADMIN role required for billing changes' }, 403);
-        }
-      }
-    } else {
-      const customer = await dbService.getBillingCustomerByUserId(user.userId);
-      if (!customer || subscription.customer_id !== customer.id) {
-        return c.json({ error: 'Subscription not found' }, 404);
-      }
+    const seatsAuthz = await authorizeSubscriptionBilling(user.userId, subscription);
+    if (!seatsAuthz.ok) {
+      return c.json({ error: seatsAuthz.error }, seatsAuthz.status);
     }
 
     const plan = await dbService.getSubscriptionPlanById(subscription.plan_id);
@@ -787,17 +852,12 @@ app.post('/:id/change-plan', async (c) => {
     // customer.subscription.updated webhook will reconcile these from Stripe's
     // authoritative values; this keeps the UI correct before the webhook lands.
     const now = Date.now();
-    const periodEnd = new Date(now);
-    if (targetPlan.billing_interval === 'YEARLY') {
-      periodEnd.setFullYear(periodEnd.getFullYear() + 1);
-    } else {
-      periodEnd.setMonth(periodEnd.getMonth() + 1);
-    }
+    const periodEndMs = computePeriodEnd(now, targetPlan.billing_interval);
 
     await dbService.updateSubscription(subscriptionId, {
       plan_id: targetPlan.id,
       current_period_start: now,
-      current_period_end: periodEnd.getTime(),
+      current_period_end: periodEndMs,
     });
 
     const updated = await dbService.getSubscriptionById(subscriptionId);
@@ -929,12 +989,9 @@ app.post('/checkout', async (c) => {
     }
 
     if (orgId) {
-      const member = await dbService.getOrganizationMember(orgId, user.userId);
-      if (!member) {
-        return c.json({ error: 'Not a member of this organization' }, 403);
-      }
-      if (member.role !== 'OWNER' && member.role !== 'ADMIN') {
-        return c.json({ error: 'OWNER or ADMIN role required for billing changes' }, 403);
+      const authz = await requireOrgBillingAdmin(orgId, user.userId);
+      if (!authz.ok) {
+        return c.json({ error: authz.error }, authz.status);
       }
     }
 
@@ -1089,19 +1146,14 @@ app.post('/checkout/confirm', async (c) => {
           status: 'TRIALING',
         });
       } else {
-        const periodEnd = new Date(now);
-        if (plan.billing_interval === 'YEARLY') {
-          periodEnd.setFullYear(periodEnd.getFullYear() + 1);
-        } else {
-          periodEnd.setMonth(periodEnd.getMonth() + 1);
-        }
+        const periodEndMs = computePeriodEnd(now, plan.billing_interval);
 
         await dbService.convertSubscriptionToActive(existingSub.id, {
           planId,
           seats,
           stripeSubscriptionId,
           currentPeriodStart: new Date(now),
-          currentPeriodEnd: periodEnd,
+          currentPeriodEnd: new Date(periodEndMs),
           status: 'ACTIVE',
         });
 
@@ -1112,12 +1164,7 @@ app.post('/checkout/confirm', async (c) => {
         }
       }
     } else {
-      const periodEnd = new Date(now);
-      if (plan.billing_interval === 'YEARLY') {
-        periodEnd.setFullYear(periodEnd.getFullYear() + 1);
-      } else {
-        periodEnd.setMonth(periodEnd.getMonth() + 1);
-      }
+      const periodEndMs = computePeriodEnd(now, plan.billing_interval);
 
       await dbService.createSubscription({
         id: nanoid(),
@@ -1128,7 +1175,7 @@ app.post('/checkout/confirm', async (c) => {
         seats,
         stripe_subscription_id: stripeSubscriptionId,
         current_period_start: now,
-        current_period_end: periodEnd.getTime(),
+        current_period_end: periodEndMs,
       });
     }
 

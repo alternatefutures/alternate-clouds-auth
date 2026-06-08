@@ -304,7 +304,10 @@ export class StripeProvider implements PaymentProvider {
       params.default_payment_method = input.paymentMethodId;
     }
 
-    const subscription = await this.stripe.subscriptions.create(params);
+    const subscription = await this.stripe.subscriptions.create(
+      params,
+      input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : undefined,
+    );
 
     const result = this.mapSubscription(subscription);
 

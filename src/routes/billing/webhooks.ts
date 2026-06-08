@@ -12,9 +12,34 @@ import {
   isChainVerifyRequired,
   verifyRelayPaymentOnChain,
 } from '../../services/payments/relayChainVerifier';
+import { disableOrg } from '../../services/seatBilling.service';
+import { computePeriodEnd } from '../../utils/billing';
 import { processTopupFromWebhook } from './credits';
 
 const app = new Hono();
+
+/**
+ * Settle the invoice linked to a succeeded payment: add the payment amount to
+ * `amount_paid`, recompute `amount_due`, and mark PAID once fully covered. No-op
+ * when the payment isn't tied to an invoice or the invoice is already PAID.
+ * Shared by the Stripe, Stax, and Relay settlement paths so the math never
+ * drifts between providers.
+ */
+async function applyPaymentToInvoice(
+  payment: { invoice_id?: string | null; amount: number },
+): Promise<void> {
+  if (!payment.invoice_id) return;
+  const invoice = await dbService.getInvoiceById(payment.invoice_id);
+  if (!invoice || invoice.status === 'PAID') return;
+  const newAmountPaid = invoice.amount_paid + payment.amount;
+  const newAmountDue = invoice.total - newAmountPaid;
+  await dbService.updateInvoice(invoice.id, {
+    amount_paid: newAmountPaid,
+    amount_due: newAmountDue,
+    status: newAmountDue <= 0 ? 'PAID' : 'OPEN',
+    paid_at: newAmountDue <= 0 ? Date.now() : undefined,
+  });
+}
 
 /**
  * POST /billing/webhooks/stripe
@@ -244,20 +269,7 @@ async function processStripeEvent(event: WebhookEvent): Promise<void> {
         }
 
         await dbService.updatePayment(payment.id, { status: 'SUCCEEDED' });
-
-        if (payment.invoice_id) {
-          const invoice = await dbService.getInvoiceById(payment.invoice_id);
-          if (invoice && invoice.status !== 'PAID') {
-            const newAmountPaid = invoice.amount_paid + payment.amount;
-            const newAmountDue = invoice.total - newAmountPaid;
-            await dbService.updateInvoice(invoice.id, {
-              amount_paid: newAmountPaid,
-              amount_due: newAmountDue,
-              status: newAmountDue <= 0 ? 'PAID' : 'OPEN',
-              paid_at: newAmountDue <= 0 ? Date.now() : undefined,
-            });
-          }
-        }
+        await applyPaymentToInvoice(payment);
       }
       break;
     }
@@ -352,6 +364,25 @@ async function processStripeEvent(event: WebhookEvent): Promise<void> {
 
         await dbService.updateSubscription(subscription.id, updates);
 
+        // A period-end cancel (cancel_at_period_end) actually terminates HERE,
+        // when Stripe deletes the subscription. An incomplete_expired (failed
+        // initial payment) also lands here. In both cases tear the org down:
+        // revoke non-owner members + suspend all compute. disableOrg is
+        // idempotent. The immediate-cancel API path clears the local Stripe id
+        // first, so this lookup won't match for that path → no double disable.
+        if (
+          mappedStatus === 'CANCELED' &&
+          subscription.status !== 'CANCELED' &&
+          subscription.org_billing_id
+        ) {
+          const orgBilling = await dbService.getOrganizationBillingById(subscription.org_billing_id);
+          if (orgBilling) {
+            await disableOrg(orgBilling.organization_id).catch((err) =>
+              console.error(`[webhook] disableOrg failed for org ${orgBilling.organization_id}:`, err),
+            );
+          }
+        }
+
         // H1: mirror the sub's payment method onto the customer's invoice
         // default so renewal + one-off (trial seat) invoices collect. Catch-all
         // for every subscribe path (Checkout, SetupIntent). Idempotent.
@@ -400,24 +431,47 @@ async function processStripeEvent(event: WebhookEvent): Promise<void> {
 
       if (subscription) {
         const existingInvoices = await dbService.listInvoicesByCustomerId(customer.id);
-        const matchByPeriod = existingInvoices.find(
-          (inv) =>
-            inv.subscription_id === subscription.id &&
-            inv.period_start === invPeriodStart &&
-            inv.period_end === invPeriodEnd &&
-            !inv.stripe_invoice_id
+        const unlinkedForSub = existingInvoices.filter(
+          (inv) => inv.subscription_id === subscription.id && !inv.stripe_invoice_id,
         );
-        if (matchByPeriod) {
-          await dbService.updateInvoice(matchByPeriod.id, {
+
+        // Link the Stripe invoice to a locally-estimated row instead of inserting
+        // a second one (which would diverge in amount). Matching is loosened to
+        // tolerate period drift from subscribe / change-plan / seat-proration:
+        //   1. exact period match, else
+        //   2. the only unlinked row for this subscription, else
+        //   3. the nearest unlinked row within a 2-day window of Stripe's period.
+        const DAY = 24 * 60 * 60 * 1000;
+        const exact = unlinkedForSub.find(
+          (inv) => inv.period_start === invPeriodStart && inv.period_end === invPeriodEnd,
+        );
+        let match = exact;
+        if (!match && unlinkedForSub.length === 1) {
+          match = unlinkedForSub[0];
+        }
+        if (!match && invPeriodStart != null) {
+          const nearest = unlinkedForSub
+            .map((inv) => ({ inv, delta: Math.abs((inv.period_start ?? 0) - invPeriodStart) }))
+            .sort((a, b) => a.delta - b.delta)[0];
+          if (nearest && nearest.delta <= 2 * DAY) match = nearest.inv;
+        }
+
+        if (match) {
+          await dbService.updateInvoice(match.id, {
             stripe_invoice_id: stripeInvoiceId,
-            invoice_number: (data.number as string) || matchByPeriod.invoice_number,
+            invoice_number: (data.number as string) || match.invoice_number,
             status: mapStripeInvoiceStatus(data.status as string),
-            subtotal: (data.subtotal as number) ?? matchByPeriod.subtotal,
-            tax: (data.tax as number) ?? matchByPeriod.tax,
-            total: (data.total as number) ?? matchByPeriod.total,
-            amount_paid: (data.amount_paid as number) ?? matchByPeriod.amount_paid,
-            amount_due: (data.amount_due as number) ?? matchByPeriod.amount_due,
-            pdf_url: (data.invoice_pdf as string) ?? matchByPeriod.pdf_url,
+            // Stripe is authoritative for amounts + period — overwrite the local
+            // estimate so the two never diverge.
+            subtotal: (data.subtotal as number) ?? match.subtotal,
+            tax: (data.tax as number) ?? match.tax,
+            total: (data.total as number) ?? match.total,
+            amount_paid: (data.amount_paid as number) ?? match.amount_paid,
+            amount_due: (data.amount_due as number) ?? match.amount_due,
+            period_start: invPeriodStart ?? match.period_start,
+            period_end: invPeriodEnd ?? match.period_end,
+            due_date: invDueDate ?? match.due_date,
+            pdf_url: (data.invoice_pdf as string) ?? match.pdf_url,
           });
           break;
         }
@@ -528,19 +582,14 @@ async function processStripeEvent(event: WebhookEvent): Promise<void> {
             });
           } else {
             // Post-trial: activate immediately
-            const periodEnd = new Date(now);
-            if (plan.billing_interval === 'YEARLY') {
-              periodEnd.setFullYear(periodEnd.getFullYear() + 1);
-            } else {
-              periodEnd.setMonth(periodEnd.getMonth() + 1);
-            }
+            const periodEndMs = computePeriodEnd(now, plan.billing_interval);
 
             await dbService.convertSubscriptionToActive(existingSub.id, {
               planId,
               seats,
               stripeSubscriptionId,
               currentPeriodStart: new Date(now),
-              currentPeriodEnd: periodEnd,
+              currentPeriodEnd: new Date(periodEndMs),
               status: 'ACTIVE',
             });
 
@@ -552,12 +601,7 @@ async function processStripeEvent(event: WebhookEvent): Promise<void> {
           }
         } else {
           // No existing subscription — create new
-          const periodEnd = new Date(now);
-          if (plan.billing_interval === 'YEARLY') {
-            periodEnd.setFullYear(periodEnd.getFullYear() + 1);
-          } else {
-            periodEnd.setMonth(periodEnd.getMonth() + 1);
-          }
+          const periodEndMs = computePeriodEnd(now, plan.billing_interval);
 
           await dbService.createSubscription({
             id: nanoid(),
@@ -568,7 +612,7 @@ async function processStripeEvent(event: WebhookEvent): Promise<void> {
             seats,
             stripe_subscription_id: stripeSubscriptionId,
             current_period_start: now,
-            current_period_end: periodEnd.getTime(),
+            current_period_end: periodEndMs,
           });
         }
 
@@ -616,20 +660,7 @@ async function processStaxEvent(event: WebhookEvent): Promise<void> {
         }
 
         await dbService.updatePayment(payment.id, { status: 'SUCCEEDED' });
-
-        if (payment.invoice_id) {
-          const invoice = await dbService.getInvoiceById(payment.invoice_id);
-          if (invoice && invoice.status !== 'PAID') {
-            const newAmountPaid = invoice.amount_paid + payment.amount;
-            const newAmountDue = invoice.total - newAmountPaid;
-            await dbService.updateInvoice(invoice.id, {
-              amount_paid: newAmountPaid,
-              amount_due: newAmountDue,
-              status: newAmountDue <= 0 ? 'PAID' : 'OPEN',
-              paid_at: newAmountDue <= 0 ? Date.now() : undefined,
-            });
-          }
-        }
+        await applyPaymentToInvoice(payment);
       }
       break;
     }
@@ -849,19 +880,7 @@ async function processRelayEvent(event: WebhookEvent): Promise<void> {
       }
 
       // Invoice settlement path (one-off invoices paid in crypto).
-      if (payment.invoice_id) {
-        const invoice = await dbService.getInvoiceById(payment.invoice_id);
-        if (invoice && invoice.status !== 'PAID') {
-          const newAmountPaid = invoice.amount_paid + payment.amount;
-          const newAmountDue = invoice.total - newAmountPaid;
-          await dbService.updateInvoice(invoice.id, {
-            amount_paid: newAmountPaid,
-            amount_due: newAmountDue,
-            status: newAmountDue <= 0 ? 'PAID' : 'OPEN',
-            paid_at: newAmountDue <= 0 ? Date.now() : undefined,
-          });
-        }
-      }
+      await applyPaymentToInvoice(payment);
       break;
     }
 

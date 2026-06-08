@@ -444,6 +444,14 @@ model Subscription {
   @@index([customerId])
   @@index([orgBillingId])
   @@index([status])
+  // NOTE: a partial UNIQUE index enforces "at most one non-terminal
+  // subscription per org" at the DB layer (defense-in-depth behind the
+  // convert-not-create subscribe flow). Prisma's DSL cannot express a
+  // partial/filtered unique index, so it lives only in raw SQL:
+  //   migrations/20260608120000_subscription_org_unique_and_dedupe
+  //   CREATE UNIQUE INDEX auth_subscriptions_org_billing_id_active_unique
+  //     ON auth_subscriptions(org_billing_id)
+  //     WHERE org_billing_id IS NOT NULL AND status <> 'CANCELED';
   @@map("auth_subscriptions")
 }
 

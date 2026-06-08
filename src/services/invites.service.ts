@@ -10,7 +10,11 @@ import { nanoid } from 'nanoid';
 import { dbService } from './db.service';
 import { hashToken } from '../utils/crypto';
 import { syncOrgSeats } from './seatBilling.service';
+import { pushMemberScopeToPlatform, revokePlatformMembership } from './platformSync.service';
 import type { OrgRole, InvitationStatus } from '@prisma/client';
+
+// Re-exported for callers that import these from the invites funnel.
+export { pushMemberScopeToPlatform, revokePlatformMembership };
 
 export const INVITE_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 
@@ -145,42 +149,6 @@ export async function attachMember(
 }
 
 /**
- * Push a member's role + project scope to service-cloud-api so the platform DB
- * mirror (used by `assertProjectAccess`) stays in sync. Best-effort: the auth
- * DB is the source of truth, and the platform also refreshes scope on lazy
- * membership sync from `/auth/me`.
- */
-export async function pushMemberScopeToPlatform(
-  organizationId: string,
-  userId: string,
-  scope: { role: OrgRole; accessAllProjects: boolean; projectIds: string[] },
-): Promise<void> {
-  const cloudApiUrl = process.env.CLOUD_API_URL;
-  const secret = process.env.AUTH_INTROSPECTION_SECRET;
-  if (!cloudApiUrl) {
-    console.warn('[invites] CLOUD_API_URL not set — skipping platform scope push');
-    return;
-  }
-  try {
-    const res = await fetch(`${cloudApiUrl}/internal/org/member-scope`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...(secret ? { 'x-af-introspection-secret': secret } : {}),
-      },
-      body: JSON.stringify({ organizationId, userId, ...scope }),
-    });
-    if (!res.ok) {
-      console.error(
-        `[invites] platform scope push returned ${res.status} for org ${organizationId} user ${userId}`,
-      );
-    }
-  } catch (err) {
-    console.error('[invites] failed to push platform member scope:', err);
-  }
-}
-
-/**
  * Update an existing member's project scope (auth DB) and push to the platform.
  */
 export async function updateMemberScope(
@@ -196,36 +164,6 @@ export async function updateMemberScope(
       accessAllProjects: member.access_all_projects,
       projectIds: member.project_ids,
     });
-  }
-}
-
-/**
- * Tell service-cloud-api to drop its cached platform `OrganizationMember` row
- * so a removed user loses platform access immediately (the cloud-api auth
- * fast-path trusts the local row and never re-checks auth once it exists).
- * Best-effort: logged on failure, since the auth DB is the source of truth.
- */
-async function revokePlatformMembership(organizationId: string, userId: string): Promise<void> {
-  const cloudApiUrl = process.env.CLOUD_API_URL;
-  const secret = process.env.AUTH_INTROSPECTION_SECRET;
-  if (!cloudApiUrl) {
-    console.warn('[invites] CLOUD_API_URL not set — skipping platform membership revoke');
-    return;
-  }
-  try {
-    const res = await fetch(`${cloudApiUrl}/internal/org/member-removed`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...(secret ? { 'x-af-introspection-secret': secret } : {}),
-      },
-      body: JSON.stringify({ organizationId, userId }),
-    });
-    if (!res.ok) {
-      console.error(`[invites] platform membership revoke returned ${res.status} for org ${organizationId} user ${userId}`);
-    }
-  } catch (err) {
-    console.error('[invites] failed to revoke platform membership:', err);
   }
 }
 
