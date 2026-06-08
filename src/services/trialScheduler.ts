@@ -59,8 +59,14 @@ export async function suspendOrgDeployments(organizationId: string): Promise<voi
 async function processExpiredTrials(): Promise<void> {
   try {
     const expired = await dbService.getExpiredTrials();
+    let claimed = 0;
     for (const { subscriptionId, orgBillingId } of expired) {
-      await dbService.updateSubscriptionStatus(subscriptionId, 'TRIAL_EXPIRED');
+      // Atomic claim: only the worker that actually flips TRIALING→TRIAL_EXPIRED
+      // proceeds to email. In a multi-replica deployment the others get
+      // count===0 and skip, so no duplicate emails / double work.
+      const won = await dbService.claimTrialExpiry(subscriptionId);
+      if (!won) continue;
+      claimed++;
 
       const owner = await dbService.getOrgOwnerEmail(orgBillingId);
       if (owner) {
@@ -70,8 +76,8 @@ async function processExpiredTrials(): Promise<void> {
 
       console.log(`[TrialScheduler] Subscription ${subscriptionId} → TRIAL_EXPIRED`);
     }
-    if (expired.length) {
-      console.log(`[TrialScheduler] Transitioned ${expired.length} trial(s) to TRIAL_EXPIRED`);
+    if (claimed) {
+      console.log(`[TrialScheduler] Transitioned ${claimed} trial(s) to TRIAL_EXPIRED`);
     }
   } catch (err) {
     console.error('[TrialScheduler] Error processing expired trials:', err);
@@ -81,8 +87,13 @@ async function processExpiredTrials(): Promise<void> {
 async function processExpiredGracePeriods(): Promise<void> {
   try {
     const expired = await dbService.getExpiredGracePeriods();
+    let claimed = 0;
     for (const { subscriptionId, orgBillingId } of expired) {
-      await dbService.updateSubscriptionStatus(subscriptionId, 'SUSPENDED');
+      // Atomic claim: only the worker that flips TRIAL_EXPIRED→SUSPENDED runs
+      // the suspension side effects (email + deployment suspend) exactly once.
+      const won = await dbService.claimGraceSuspension(subscriptionId);
+      if (!won) continue;
+      claimed++;
 
       const owner = await dbService.getOrgOwnerEmail(orgBillingId);
       if (owner) {
@@ -94,8 +105,8 @@ async function processExpiredGracePeriods(): Promise<void> {
 
       console.log(`[TrialScheduler] Subscription ${subscriptionId} → SUSPENDED`);
     }
-    if (expired.length) {
-      console.log(`[TrialScheduler] Transitioned ${expired.length} subscription(s) to SUSPENDED`);
+    if (claimed) {
+      console.log(`[TrialScheduler] Transitioned ${claimed} subscription(s) to SUSPENDED`);
     }
   } catch (err) {
     console.error('[TrialScheduler] Error processing expired grace periods:', err);

@@ -15,6 +15,7 @@ import {
 } from '../../services/invites.service';
 import { canOrgInviteMembers, cancelOrgSubscription } from '../../services/seatBilling.service';
 import { suspendOrgDeployments } from '../../services/trialScheduler';
+import { computeProrationCents } from '../../utils/billing';
 
 const app = new Hono();
 
@@ -576,17 +577,16 @@ app.get('/:id/seats/preview', standardRateLimit, async (c) => {
     const plan = subscription ? await dbService.getSubscriptionPlanById(subscription.plan_id) : null;
     const basePricePerSeatCents = plan?.base_price_per_seat ?? 0;
 
-    // Day-based proration for the remaining current period (Slack formula).
+    // Day-based proration for the remaining current period. Shares the exact
+    // same helper as the seat-sync CHARGE path (seatBilling.service.ts) so the
+    // estimate shown here can never drift from what the user is actually billed.
     let estimatedProrationCents = 0;
     if (subscription && basePricePerSeatCents > 0) {
-      const start = subscription.current_period_start;
-      const end = subscription.current_period_end;
-      const now = Date.now();
-      const totalMs = Math.max(1, end - start);
-      const remainingMs = Math.max(0, end - now);
-      const fractionRemaining = Math.min(1, remainingMs / totalMs);
-      const seatDelta = newSeats - currentSeats;
-      estimatedProrationCents = Math.round(basePricePerSeatCents * seatDelta * fractionRemaining);
+      estimatedProrationCents = computeProrationCents(
+        subscription,
+        basePricePerSeatCents,
+        newSeats - currentSeats,
+      );
     }
 
     const inviteGate = await canOrgInviteMembers(orgId);

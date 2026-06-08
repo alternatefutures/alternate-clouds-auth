@@ -1506,13 +1506,22 @@ export class DatabaseService {
   /**
    * Remove every non-OWNER member of an org. Used when a paid subscription is
    * canceled — the org is disabled down to just its owner (who can re-subscribe
-   * to recover it). Returns the number of memberships removed.
+   * to recover it). Returns the userIds removed so the caller can revoke each
+   * one's cached platform (cloud-api) membership.
    */
-  async removeNonOwnerMembers(organizationId: string): Promise<number> {
-    const result = await this.prisma.organizationMember.deleteMany({
+  async removeNonOwnerMembers(organizationId: string): Promise<string[]> {
+    // Read the userIds BEFORE deleting so the caller can fan out platform
+    // revokes (cloud-api caches OrganizationMember rows and won't re-check).
+    const toRemove = await this.prisma.organizationMember.findMany({
+      where: { organizationId, role: { not: 'OWNER' } },
+      select: { userId: true },
+    });
+    if (toRemove.length === 0) return [];
+
+    await this.prisma.organizationMember.deleteMany({
       where: { organizationId, role: { not: 'OWNER' } },
     });
-    return result.count;
+    return toRemove.map((m) => m.userId);
   }
 
   async isUserMemberOfOrganization(userId: string, organizationId: string): Promise<boolean> {
@@ -1736,6 +1745,51 @@ export class DatabaseService {
       created_at: org.createdAt.getTime(),
       updated_at: org.updatedAt.getTime(),
     };
+  }
+
+  /**
+   * Idempotent lazy recovery: guarantee a user owns at least one organization.
+   *
+   * A signup whose org `$transaction` failed AFTER the user + authMethod rows
+   * committed leaves an orphaned account — the identifier is taken (so re-signup
+   * is blocked) but the user has ZERO orgs, making the app unusable. Calling
+   * this on session resolution self-heals that account by creating the default
+   * org. No-op when the user already has ≥1 org. Returns true iff it created one.
+   *
+   * Safe under concurrency: if a parallel request wins the create, the P2002 is
+   * swallowed and we report success as long as an org now exists.
+   */
+  async ensureUserHasDefaultOrganization(userId: string, fallbackName?: string): Promise<boolean> {
+    const existing = await this.getOrganizationsByUserId(userId);
+    if (existing.length > 0) return false;
+
+    const base = (fallbackName || 'My').split('@')[0] || 'My';
+    const orgSlug = `user-${userId.slice(0, 8)}`;
+    try {
+      console.log(`[org-heal] user ${userId} has 0 orgs — creating default org (self-heal)`);
+      await this.createDefaultOrganizationForUser({
+        orgId: nanoid(),
+        memberId: nanoid(),
+        billingId: nanoid(),
+        billingCustomerId: nanoid(),
+        subscriptionId: nanoid(),
+        userId,
+        orgSlug,
+        orgName: `${base}'s Org`,
+      });
+      console.log(`[org-heal] ✓ default org created for user ${userId}`);
+      return true;
+    } catch (err) {
+      // A concurrent heal may have created it first — treat as success if an org
+      // now exists, otherwise surface the failure (caller leaves orgs empty).
+      const after = await this.getOrganizationsByUserId(userId);
+      if (after.length > 0) {
+        console.warn(`[org-heal] create raced for user ${userId}; org already exists`);
+        return false;
+      }
+      console.error(`[org-heal] ✖ failed to self-heal org for user ${userId}:`, err);
+      return false;
+    }
   }
 
   /**
@@ -2450,6 +2504,35 @@ export class DatabaseService {
   }
 
   /**
+   * Atomically claim a TRIALING→TRIAL_EXPIRED transition. Returns true only for
+   * the caller that actually flipped the row (count === 1). The conditional
+   * `updateMany` (status still TRIALING AND trial still expired) is the claim:
+   * in a multi-replica deployment only ONE worker wins, so the side effects
+   * (email, logging) run exactly once instead of once per replica.
+   */
+  async claimTrialExpiry(subscriptionId: string): Promise<boolean> {
+    const res = await this.prisma.subscription.updateMany({
+      where: { id: subscriptionId, status: 'TRIALING', trialEnd: { lt: new Date() } },
+      data: { status: 'TRIAL_EXPIRED' },
+    });
+    return res.count === 1;
+  }
+
+  /**
+   * Atomically claim a TRIAL_EXPIRED→SUSPENDED transition once the 3-day grace
+   * window has passed. Returns true only for the worker that flipped the row, so
+   * the suspension email + deployment suspend run exactly once across replicas.
+   */
+  async claimGraceSuspension(subscriptionId: string): Promise<boolean> {
+    const graceCutoff = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000);
+    const res = await this.prisma.subscription.updateMany({
+      where: { id: subscriptionId, status: 'TRIAL_EXPIRED', trialEnd: { lt: graceCutoff } },
+      data: { status: 'SUSPENDED' },
+    });
+    return res.count === 1;
+  }
+
+  /**
    * Convert a trial/expired subscription to a new status with new plan and period.
    * Use INCOMPLETE when payment is pending, ACTIVE when confirmed.
    * Pass trialEnd to preserve the trial end date (mid-trial subscription setup).
@@ -2692,6 +2775,11 @@ export class DatabaseService {
     if (updates.pdf_url !== undefined) data.pdfUrl = updates.pdf_url;
     if (updates.invoice_number !== undefined) data.invoiceNumber = updates.invoice_number;
     if (updates.stripe_invoice_id !== undefined) data.stripeInvoiceId = updates.stripe_invoice_id;
+    // Period/due-date: let reconciliation overwrite a locally-estimated period
+    // with Stripe's authoritative one when linking an unlinked invoice row.
+    if (updates.period_start !== undefined) data.periodStart = timestampToDate(updates.period_start);
+    if (updates.period_end !== undefined) data.periodEnd = timestampToDate(updates.period_end);
+    if (updates.due_date !== undefined) data.dueDate = timestampToDate(updates.due_date);
 
     await this.prisma.invoice.update({
       where: { id },

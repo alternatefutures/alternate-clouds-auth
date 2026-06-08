@@ -205,8 +205,19 @@ app.get('/me', authMiddleware, async (c) => {
       return c.json({ error: 'User not found' }, 404);
     }
 
-    // Get user's organizations
-    const organizations = await dbService.getOrganizationsByUserId(authUser.userId);
+    // Get user's organizations. If a past signup orphaned the account (user row
+    // committed but the org transaction failed → zero orgs, app unusable),
+    // self-heal idempotently here so the session resolves into a working state.
+    let organizations = await dbService.getOrganizationsByUserId(authUser.userId);
+    if (organizations.length === 0) {
+      const healed = await dbService.ensureUserHasDefaultOrganization(
+        authUser.userId,
+        user.display_name || user.email || undefined,
+      );
+      if (healed) {
+        organizations = await dbService.getOrganizationsByUserId(authUser.userId);
+      }
+    }
 
     return c.json({
       user: {

@@ -152,6 +152,10 @@ export interface CreateSubscriptionInput {
   // Update-only controls (ignored on create)
   prorationBehavior?: ProrationBehavior; // how Stripe handles mid-cycle changes
   billingCycleAnchorNow?: boolean; // reset the billing cycle to the change date
+  // Create-only: Stripe idempotency key. Two concurrent identical subscribe
+  // calls (double-click, retry) return the SAME subscription instead of two
+  // live ones both charging the card.
+  idempotencyKey?: string;
 }
 
 /**
