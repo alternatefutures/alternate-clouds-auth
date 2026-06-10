@@ -13,8 +13,9 @@ import {
   detachMember,
   updateMemberScope,
 } from '../../services/invites.service';
-import { canOrgInviteMembers, cancelOrgSubscription } from '../../services/seatBilling.service';
+import { canOrgInviteMembers, cancelOrgSubscription, voidOpenOrgInvoices } from '../../services/seatBilling.service';
 import { suspendOrgDeployments } from '../../services/trialScheduler';
+import { notifyPlatformOrgDeleted, pushMemberScopeToPlatform } from '../../services/platformSync.service';
 import { computeProrationCents } from '../../utils/billing';
 
 const app = new Hono();
@@ -227,6 +228,9 @@ app.delete('/:id', standardRateLimit, async (c) => {
   try {
     const authUser = requireAuthUser(c);
     const orgId = c.req.param('id');
+    if (!orgId) {
+      return c.json({ error: 'Missing organization id' }, 400);
+    }
 
     const member = await dbService.getOrganizationMember(orgId, authUser.userId);
 
@@ -248,6 +252,27 @@ app.delete('/:id', standardRateLimit, async (c) => {
       return c.json({ error: 'Personal organizations cannot be deleted.' }, 400);
     }
 
+    // A positive credit-wallet balance is destroyed by the cascade delete.
+    // Block unless the caller explicitly opts in with ?force=true so prepaid
+    // funds are never silently vaporized (W2-11).
+    const force = c.req.query('force') === 'true';
+    if (!force) {
+      const orgBilling = await dbService.getOrganizationBillingByOrgId(orgId);
+      if (orgBilling) {
+        const wallet = await dbService.getOrgUsageBalance(orgBilling.id);
+        if (wallet && wallet.balance_cents > 0) {
+          return c.json(
+            {
+              error: `This organization has a credit balance of $${(wallet.balance_cents / 100).toFixed(2)} that will be permanently lost. Re-submit with ?force=true to delete anyway.`,
+              code: 'WALLET_BALANCE_NONZERO',
+              balanceCents: wallet.balance_cents,
+            },
+            409,
+          );
+        }
+      }
+    }
+
     // Cancel any live Stripe subscription FIRST. Deleting the org cascades its
     // DB rows but does NOT touch Stripe — a live subscription would keep billing
     // the customer for a deleted org. Unused paid time is credited to the
@@ -263,11 +288,27 @@ app.delete('/:id', standardRateLimit, async (c) => {
       );
     }
 
+    // Void any OPEN/draft Stripe invoices so nothing finalizes and charges
+    // the card after the org is gone (W2-5). Best-effort: void failures are
+    // logged loudly inside for manual reconciliation.
+    await voidOpenOrgInvoices(orgId).catch((err) =>
+      console.error(`Failed to void open invoices before deleting org ${orgId}:`, err),
+    );
+
     // Tear down running compute BEFORE the DB rows are cascade-deleted, otherwise
     // Akash/Phala/Spheron workloads keep running with no org to manage or bill
     // them (High #3). Best-effort — a teardown failure must not block deletion.
     await suspendOrgDeployments(orgId).catch((err) =>
       console.error(`Failed to suspend deployments before deleting org ${orgId}:`, err),
+    );
+
+    // Revoke EVERY member's cached platform membership. The cloud-api auth
+    // fast-path trusts its local OrganizationMember row without revalidating,
+    // so skipping this leaves former members with project/shell access after
+    // the org is gone (B4). Best-effort with retries inside; must not block
+    // the delete.
+    await notifyPlatformOrgDeleted(orgId).catch((err) =>
+      console.error(`Platform org-deleted fan-out failed for org ${orgId}:`, err),
     );
 
     await dbService.deleteOrganization(orgId);
@@ -341,6 +382,9 @@ app.patch('/:id/members/:userId/role', standardRateLimit, async (c) => {
     const authUser = requireAuthUser(c);
     const orgId = c.req.param('id');
     const targetUserId = c.req.param('userId');
+    if (!orgId || !targetUserId) {
+      return c.json({ error: 'Missing organization or user id' }, 400);
+    }
 
     const caller = await dbService.getOrganizationMember(orgId, authUser.userId);
     if (!caller) {
@@ -368,10 +412,22 @@ app.patch('/:id/members/:userId/role', standardRateLimit, async (c) => {
 
     await dbService.updateOrganizationMemberRole(orgId, targetUserId, role);
 
-    // Elevating to ADMIN grants full project access — keep the platform mirror
-    // consistent (role here is only ever ADMIN | MEMBER).
+    // Push role + scope to the platform mirror on EVERY role change.
+    // Pushing only on elevation left demoted admins with full org access
+    // on the platform side (B6): the mirror's role stayed ADMIN forever.
     if (role === 'ADMIN') {
+      // Elevation grants full project access.
       await updateMemberScope(orgId, targetUserId, { accessAllProjects: true, projectIds: [] });
+    } else {
+      // Demotion: keep the member's stored project scope, sync the new role.
+      const updated = await dbService.getOrganizationMember(orgId, targetUserId);
+      if (updated) {
+        await pushMemberScopeToPlatform(orgId, targetUserId, {
+          role: updated.role,
+          accessAllProjects: updated.access_all_projects,
+          projectIds: updated.project_ids,
+        });
+      }
     }
     return c.json({ success: true, userId: targetUserId, role });
   } catch (error) {

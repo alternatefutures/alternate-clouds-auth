@@ -334,6 +334,15 @@ app.post('/transfers', async (c) => {
       return c.json({ error: 'Source payment not found or not settled' }, 400);
     }
 
+    // The source payment must belong to the CALLER — without this check any
+    // authenticated user could fund a transfer from someone else's settled
+    // payment by guessing/leaking its id (IDOR). Same opaque 400 as the
+    // not-found case so payment ids can't be enumerated.
+    const callerCustomer = await dbService.getBillingCustomerByUserId(user.userId);
+    if (!callerCustomer || sourcePayment.customer_id !== callerCustomer.id) {
+      return c.json({ error: 'Source payment not found or not settled' }, 400);
+    }
+
     if (data.amount > sourcePayment.amount) {
       return c.json({ error: 'Transfer amount exceeds source payment amount' }, 400);
     }

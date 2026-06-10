@@ -9,7 +9,7 @@ import { randomBytes } from 'node:crypto';
 import { nanoid } from 'nanoid';
 import { dbService } from './db.service';
 import { hashToken } from '../utils/crypto';
-import { syncOrgSeats } from './seatBilling.service';
+import { syncOrgSeats, canOrgInviteMembers } from './seatBilling.service';
 import { pushMemberScopeToPlatform, revokePlatformMembership } from './platformSync.service';
 import type { OrgRole, InvitationStatus } from '@prisma/client';
 
@@ -131,20 +131,40 @@ export async function attachMember(
   if (existing) {
     return { created: false };
   }
-  const member = await dbService.createOrganizationMember({
-    id: nanoid(),
-    organization_id: organizationId,
-    user_id: userId,
-    role,
-    access_all_projects: scope?.accessAllProjects ?? true,
-    project_ids: scope?.projectIds ?? [],
-  });
+  let member;
+  try {
+    member = await dbService.createOrganizationMember({
+      id: nanoid(),
+      organization_id: organizationId,
+      user_id: userId,
+      role,
+      access_all_projects: scope?.accessAllProjects ?? true,
+      project_ids: scope?.projectIds ?? [],
+    });
+  } catch (err) {
+    // Concurrent accept (login reconcile racing the accept page) — the
+    // existence check above passed in both, the unique constraint caught
+    // the loser. Idempotent success, same as the `existing` branch.
+    if ((err as { code?: string }).code === 'P2002') {
+      return { created: false };
+    }
+    throw err;
+  }
   await pushMemberScopeToPlatform(organizationId, userId, {
     role,
     accessAllProjects: member.access_all_projects,
     projectIds: member.project_ids,
   });
-  await syncOrgSeats(organizationId, { reason: 'member_added' });
+  const seatSync = await syncOrgSeats(organizationId, { reason: 'member_added' });
+  if (!seatSync.synced) {
+    // Member row exists but Stripe seats were not bumped. syncOrgSeats
+    // recomputes from the member count, so the NEXT membership change
+    // self-heals — but until then the org is under-billed. Loud so ops
+    // can reconcile manually if no further changes happen.
+    console.error(
+      `[invites] CRITICAL: seat sync failed after member add for org ${organizationId} — Stripe seat count is behind member count`,
+    );
+  }
   return { created: true };
 }
 
@@ -174,7 +194,12 @@ export async function updateMemberScope(
 export async function detachMember(organizationId: string, userId: string): Promise<void> {
   await dbService.deleteOrganizationMember(organizationId, userId);
   await revokePlatformMembership(organizationId, userId);
-  await syncOrgSeats(organizationId, { reason: 'member_removed' });
+  const seatSync = await syncOrgSeats(organizationId, { reason: 'member_removed' });
+  if (!seatSync.synced) {
+    console.error(
+      `[invites] seat sync failed after member removal for org ${organizationId} — Stripe seat count ahead of member count until the next membership change`,
+    );
+  }
 }
 
 /**
@@ -211,6 +236,18 @@ export async function acceptInvitationByToken(params: {
     return { ok: false, reason: 'email_mismatch' };
   }
 
+  // The org's eligibility may have changed since the invite was sent
+  // (subscription canceled, org disabled). A stale PENDING invite must not
+  // grant membership — expire it so it can't be retried either.
+  const eligibility = await canOrgInviteMembers(invite.organizationId);
+  if (!eligibility.allowed) {
+    await prisma.organizationInvitation.update({
+      where: { id: invite.id },
+      data: { status: 'EXPIRED' },
+    });
+    return { ok: false, reason: 'expired' };
+  }
+
   await attachMember(invite.organizationId, params.userId, invite.role, {
     accessAllProjects: invite.accessAllProjects,
     projectIds: invite.projectIds,
@@ -243,6 +280,17 @@ export async function reconcilePendingInvites(userId: string, email: string): Pr
       continue;
     }
     try {
+      // Same gate as acceptInvitationByToken: the org may no longer be
+      // allowed to add members (canceled/INACTIVE) — expire instead of join.
+      const eligibility = await canOrgInviteMembers(invite.organizationId);
+      if (!eligibility.allowed) {
+        await prisma.organizationInvitation.update({
+          where: { id: invite.id },
+          data: { status: 'EXPIRED' },
+        });
+        continue;
+      }
+
       await attachMember(invite.organizationId, userId, invite.role, {
         accessAllProjects: invite.accessAllProjects,
         projectIds: invite.projectIds,

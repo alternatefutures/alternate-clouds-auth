@@ -656,6 +656,19 @@ export class StripeProvider implements PaymentProvider {
     return invoices.data.map((inv) => this.mapInvoice(inv));
   }
 
+  async voidInvoice(invoiceId: string): Promise<void> {
+    const invoice = await this.stripe.invoices.retrieve(invoiceId);
+    if (invoice.status === 'draft') {
+      // Drafts cannot be voided in Stripe — they are deleted.
+      await this.stripe.invoices.del(invoiceId);
+      return;
+    }
+    if (invoice.status === 'open' || invoice.status === 'uncollectible') {
+      await this.stripe.invoices.voidInvoice(invoiceId);
+    }
+    // paid / already void: nothing to do.
+  }
+
   private mapInvoice(invoice: Stripe.Invoice): ExternalInvoice {
     const statusMap: Record<Stripe.Invoice.Status, ExternalInvoice['status']> = {
       draft: 'draft',

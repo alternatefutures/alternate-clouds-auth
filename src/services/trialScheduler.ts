@@ -99,8 +99,22 @@ async function processExpiredGracePeriods(): Promise<void> {
       if (owner) {
         await emailService.sendAccessSuspendedEmail(owner.email, owner.orgName, owner.orgId)
           .catch(err => console.error(`[TrialScheduler] Failed to send suspended email to ${owner.email}:`, err));
+      }
 
-        await suspendOrgDeployments(owner.orgId);
+      // Suspend compute REGARDLESS of whether an owner email resolved —
+      // gating teardown on `if (owner)` left owner-less/oauth orgs
+      // SUSPENDED in the DB while their deployments kept running and
+      // burning platform funds (SH12). The email is best-effort; the
+      // teardown is not.
+      const orgId =
+        owner?.orgId ??
+        (await dbService.getOrganizationBillingById(orgBillingId))?.organization_id;
+      if (orgId) {
+        await suspendOrgDeployments(orgId);
+      } else {
+        console.error(
+          `[TrialScheduler] CRITICAL: could not resolve orgId for orgBilling ${orgBillingId} — compute NOT suspended`,
+        );
       }
 
       console.log(`[TrialScheduler] Subscription ${subscriptionId} → SUSPENDED`);

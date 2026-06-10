@@ -276,6 +276,51 @@ export async function disableOrg(organizationId: string): Promise<void> {
  * Throws on an unexpected provider error so the caller can abort the delete and
  * avoid orphaning the subscription. A missing/already-canceled sub is success.
  */
+/**
+ * Void every OPEN (and delete every DRAFT) Stripe invoice for the org's
+ * billing customer. Called before org deletion: a dangling open invoice
+ * would otherwise finalize later and charge the card for an org that no
+ * longer exists. Best-effort per invoice — a single void failure must not
+ * block the delete (the error is loud for manual reconciliation).
+ */
+export async function voidOpenOrgInvoices(organizationId: string): Promise<number> {
+  const orgBilling = await dbService.getOrganizationBillingByOrgId(organizationId);
+  if (!orgBilling) return 0;
+
+  const subscription = await dbService.getSubscriptionByOrgBillingId(orgBilling.id);
+  const billingCustomer = subscription
+    ? await dbService.getBillingCustomerById(subscription.customer_id)
+    : null;
+  const stripeCustomerId = billingCustomer?.stripe_customer_id ?? orgBilling.stripe_customer_id;
+  if (!stripeCustomerId) return 0;
+
+  const provider = getDefaultProvider();
+  if (!provider.listInvoices || !provider.voidInvoice) return 0;
+
+  let voided = 0;
+  try {
+    const invoices = await provider.listInvoices(stripeCustomerId, 25);
+    for (const inv of invoices) {
+      if (inv.status !== 'open' && inv.status !== 'draft') continue;
+      try {
+        await provider.voidInvoice(inv.id);
+        voided += 1;
+      } catch (err) {
+        console.error(
+          `[seatBilling] failed to void invoice ${inv.id} for org ${organizationId} — reconcile manually:`,
+          err,
+        );
+      }
+    }
+  } catch (err) {
+    console.error(`[seatBilling] could not list invoices for org ${organizationId}:`, err);
+  }
+  if (voided > 0) {
+    console.log(`[seatBilling] voided ${voided} open/draft invoice(s) before deleting org ${organizationId}`);
+  }
+  return voided;
+}
+
 export async function cancelOrgSubscription(
   organizationId: string,
   opts?: { prorate?: boolean },

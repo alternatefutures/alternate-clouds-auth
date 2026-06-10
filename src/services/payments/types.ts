@@ -323,6 +323,9 @@ export interface PaymentProvider {
   // Invoices (optional)
   getInvoice?(invoiceId: string): Promise<ExternalInvoice | null>;
   listInvoices?(customerId: string, limit?: number): Promise<ExternalInvoice[]>;
+  // Void an open invoice (drafts are deleted). Used before org deletion so a
+  // dangling OPEN invoice can't finalize and charge the card for a dead org.
+  voidInvoice?(invoiceId: string): Promise<void>;
 
   // Checkout Sessions (Stripe Checkout redirect flow)
   createCheckoutSession?(input: CreateCheckoutSessionInput): Promise<CheckoutSession>;
