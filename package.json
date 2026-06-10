@@ -37,7 +37,7 @@
   "license": "AGPL-3.0-only",
   "dependencies": {
     "@hono/node-server": "^1.19.14",
-    "@infisical/sdk": "^2.3.4",
+    "@infisical/sdk": "^5.0.0",
     "@prisma/client": "^6.19.3",
     "dotenv": "^17.2.3",
     "ethers": "^6.13.0",
