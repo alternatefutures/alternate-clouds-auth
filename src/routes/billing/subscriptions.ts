@@ -88,7 +88,9 @@ async function authorizeSubscriptionBilling(
     if (orgBilling) {
       return requireOrgBillingAdmin(orgBilling.organization_id, userId);
     }
-    return { ok: true };
+    // Fail CLOSED: an org subscription whose billing row is missing is a
+    // data integrity problem, not a license for any caller to mutate it.
+    return { ok: false, status: 404, error: 'Subscription not found' };
   }
 
   const customer = await dbService.getBillingCustomerByUserId(userId);
@@ -663,6 +665,23 @@ app.put('/:id/seats', async (c) => {
     const seatsAuthz = await authorizeSubscriptionBilling(user.userId, subscription);
     if (!seatsAuthz.ok) {
       return c.json({ error: seatsAuthz.error }, seatsAuthz.status);
+    }
+
+    // Floor at the org's member count — a manual seat update below it would
+    // contradict syncOrgSeats and under-bill seats that are occupied (B7).
+    if (subscription.org_billing_id) {
+      const orgBilling = await dbService.getOrganizationBillingById(subscription.org_billing_id);
+      if (orgBilling) {
+        const members = await dbService.getOrganizationMembers(orgBilling.organization_id);
+        if (data.seats < members.length) {
+          return c.json(
+            {
+              error: `Seat count cannot be below the current member count (${members.length}). Remove members first.`,
+            },
+            400,
+          );
+        }
+      }
     }
 
     const plan = await dbService.getSubscriptionPlanById(subscription.plan_id);

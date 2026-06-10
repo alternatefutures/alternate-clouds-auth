@@ -1,5 +1,6 @@
 import { Hono } from 'hono';
 import { z } from 'zod';
+import { timingSafeCompare } from '../../utils/crypto';
 import { whitelistService } from '../../services/whitelist.service';
 import { whitelistRequestService } from '../../services/whitelistRequest.service';
 import { emailService } from '../../services/email.service';
@@ -23,7 +24,7 @@ app.use('*', async (c, next) => {
     return c.json({ error: 'Admin endpoints not configured' }, 503);
   }
   const provided = c.req.header('x-af-introspection-secret');
-  if (provided !== secret) {
+  if (!provided || !timingSafeCompare(provided, secret)) {
     return c.json({ error: 'Unauthorized' }, 401);
   }
   await next();
