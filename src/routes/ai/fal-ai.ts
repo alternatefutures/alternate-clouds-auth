@@ -10,6 +10,8 @@ import {
   FLAT_MIN_BALANCE_CENTS,
   getOrgBillingFromRequest,
   processUsage,
+  processUsageFailClosed,
+  BillingFailedError,
 } from './_lib/costMetering';
 import { FAL_AI_COSTS } from './_lib/costs';
 
@@ -141,7 +143,7 @@ async function handleFalRequest(c: any, modelId: string): Promise<Response> {
   const responseBody = await upstreamResponse.json();
 
   try {
-    const result = await processUsage({
+    const result = await processUsageFailClosed({
       orgBillingId: billing.orgBillingId,
       userId: billing.userId,
       serviceType: 'ai_inference',
@@ -155,6 +157,9 @@ async function handleFalRequest(c: any, modelId: string): Promise<Response> {
       'x-af-balance-cents': result.newBalanceCents.toString(),
     });
   } catch (error) {
+    if (error instanceof BillingFailedError) {
+      return c.json({ error: 'Billing processing failed. Your account was not charged. Please retry.' }, 500);
+    }
     console.error('Error processing usage:', error);
   }
 

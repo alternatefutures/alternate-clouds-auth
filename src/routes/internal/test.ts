@@ -26,12 +26,16 @@ app.use('*', async (c, next) => {
     return c.json({ error: 'Test endpoints are disabled in production' }, 403);
   }
 
+  // Fail CLOSED when the secret is missing: these endpoints expose plaintext
+  // OTPs (/otp/:email), /force-activate and /cleanup — on staging (where the
+  // production guard above doesn't apply) an unset secret made them public.
   const secret = process.env.AUTH_INTROSPECTION_SECRET;
-  if (secret) {
-    const provided = c.req.header('x-af-introspection-secret');
-    if (!provided || !timingSafeCompare(provided, secret)) {
-      return c.json({ error: 'Unauthorized' }, 401);
-    }
+  if (!secret) {
+    return c.json({ error: 'Test endpoints not configured' }, 503);
+  }
+  const provided = c.req.header('x-af-introspection-secret');
+  if (!provided || !timingSafeCompare(provided, secret)) {
+    return c.json({ error: 'Unauthorized' }, 401);
   }
 
   return next();

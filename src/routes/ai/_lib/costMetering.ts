@@ -71,13 +71,35 @@ export function calculateUsdWithMargin(
 // TOKEN COST CALCULATION
 // ============================================
 
+/**
+ * Look up a per-token cost tolerating OpenRouter-style model ids.
+ * OpenRouter reports "vendor/model[:variant]" (e.g. "anthropic/claude-opus-4",
+ * "openai/gpt-4o:nitro") while the table keys are mostly bare names — the
+ * exact-match-only lookup silently fell through to the cheap DEFAULT cost and
+ * undercharged frontier models 15–25×.
+ */
+function lookupModelCost(
+  table: Record<string, number | { text: number; audio: number }>,
+  model: string,
+): number | { text: number; audio: number } | undefined {
+  if (model in table) return table[model];
+  const noVariant = model.split(':')[0];
+  if (noVariant in table) return table[noVariant];
+  const slash = noVariant.indexOf('/');
+  if (slash > -1) {
+    const bare = noVariant.slice(slash + 1);
+    if (bare in table) return table[bare];
+  }
+  return undefined;
+}
+
 export function calculateTokenCost(
   model: string,
   inputTokens: number,
   outputTokens: number
 ): number {
-  const inputCostPerToken = INPUT_COST_PER_TOKEN[model];
-  const outputCostPerToken = OUTPUT_COST_PER_TOKEN[model];
+  const inputCostPerToken = lookupModelCost(INPUT_COST_PER_TOKEN, model);
+  const outputCostPerToken = lookupModelCost(OUTPUT_COST_PER_TOKEN, model);
 
   // Use defaults if model not found
   const inputCost = typeof inputCostPerToken === 'number'
@@ -417,6 +439,45 @@ export function parseSSEForUsage(text: string): UsageInfo | null {
 // ============================================
 // USAGE PROCESSING (USD)
 // ============================================
+
+/**
+ * Thrown when billing could not be processed after a retry. Routes MUST
+ * catch this and return 500 — serving the response anyway means free
+ * inference (SH9).
+ */
+export class BillingFailedError extends Error {
+  constructor() {
+    super('Billing processing failed');
+    this.name = 'BillingFailedError';
+  }
+}
+
+/**
+ * Fail-closed wrapper around processUsage: one retry on transient failure,
+ * then BillingFailedError. Mirrors the inline pattern openai.ts/v1.ts have
+ * had all along — the other adapters swallowed billing errors and served
+ * the response unbilled.
+ */
+export async function processUsageFailClosed(
+  args: Parameters<typeof processUsage>[0],
+): Promise<Awaited<ReturnType<typeof processUsage>>> {
+  // ONE idempotency identity across both attempts: processUsage falls back
+  // to a fresh nanoid per call when no requestId is given, so a retry after
+  // a lost-response timeout would mint a new key and DOUBLE-charge.
+  const stableArgs = { ...args, requestId: args.requestId ?? nanoid() };
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      return await processUsage(stableArgs);
+    } catch (error) {
+      if (attempt === 1) {
+        console.error('CRITICAL: AI usage billing failed after retry — blocking response', error);
+        break;
+      }
+      console.warn('AI usage billing failed, retrying...', error);
+    }
+  }
+  throw new BillingFailedError();
+}
 
 /**
  * Process usage for a completed request

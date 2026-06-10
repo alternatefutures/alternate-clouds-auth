@@ -182,8 +182,13 @@ export async function withAudit<T>(
 // redaction rules.
 // ────────────────────────────────────────────────────────────────────────────
 
+// Exact sensitive names PLUS any key ENDING in token/secret/password —
+// the exact-match-only version let `accessToken` / `refreshToken` /
+// `clientSecret` through into audit rows verbatim. Suffix matching is
+// deliberate (not substring) so `tokenCount` / `idempotencyKey` stay
+// observable.
 const SECRET_KEY_RE =
-  /^(password|passwd|secret|token|authorization|cookie|set-cookie|private[_-]?key|api[_-]?key|jwt|session|card|cvc|cvv|pan|ssn)$/i
+  /^(password|passwd|secret|token|authorization|cookie|set-cookie|private[_-]?key|api[_-]?key|jwt|session|card|cvc|cvv|pan|ssn)$|(token|secret|password)s?$/i
 
 const MAX_STRING_LEN = 4_096
 const MAX_DEPTH = 6

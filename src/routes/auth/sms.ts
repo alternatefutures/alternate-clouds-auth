@@ -27,6 +27,12 @@ app.post('/request', strictRateLimit, async (c) => {
     const body = await c.req.json();
     const { phone } = smsAuthRequestSchema.parse(body);
 
+    // Whitelist gate — reject BEFORE sending. Every SMS costs real Twilio
+    // money, so an ungated request endpoint is a direct abuse/cost vector
+    // (the email flow has had this gate all along; W2-15).
+    const wl = await whitelistService.check403(phone);
+    if (wl) return c.json(wl.body, wl.status);
+
     // Generate OTP code
     const code = generateOTP(6);
     const expiresAt = Date.now() + 10 * 60 * 1000; // 10 minutes
@@ -90,18 +96,15 @@ app.post('/verify', strictRateLimit, async (c) => {
     // Get verification code from database
     const verificationCode = await dbService.getVerificationCode(phone, 'sms');
 
-    if (!verificationCode) {
-      return c.json({ error: 'No verification code found for this phone number' }, 404);
+    // Opaque, uniform errors (aligned with the email flow, W2-16): a
+    // distinguishable "no code" / "expired" / "max attempts" tells an
+    // attacker which phase of brute force they're in.
+    if (!verificationCode || Date.now() > verificationCode.expires_at) {
+      return c.json({ error: 'Invalid or expired verification code' }, 400);
     }
 
-    // Check if code has expired
-    if (Date.now() > verificationCode.expires_at) {
-      return c.json({ error: 'Verification code has expired' }, 400);
-    }
-
-    // Check if max attempts exceeded
     if (verificationCode.attempts >= verificationCode.max_attempts) {
-      return c.json({ error: 'Maximum verification attempts exceeded' }, 429);
+      return c.json({ error: 'Invalid or expired verification code' }, 400);
     }
 
     // Fixed by audit 2026-03: timing-safe OTP comparison (was !== operator)
@@ -116,17 +119,19 @@ app.post('/verify', strictRateLimit, async (c) => {
       return c.json({ error: 'Invalid verification code' }, 400);
     }
 
-    // Check if already verified
-    if (verificationCode.verified) {
-      return c.json({ error: 'Verification code already used' }, 400);
-    }
-
-    // Mark code as verified
-    await dbService.markVerificationCodeAsUsed(verificationCode.id);
-
-    // Whitelist gate
+    // Whitelist gate BEFORE consuming the code (same order as email):
+    // burning first stranded users who get whitelisted minutes later and
+    // leaked code validity via the 403.
     const wl = await whitelistService.check403(phone);
     if (wl) return c.json(wl.body, wl.status);
+
+    // Atomic single-use claim — replaces the racy read-then-update
+    // (`if (verified)` check + separate mark): only the request that flips
+    // verified 0→1 proceeds (W2-16).
+    const claimed = await dbService.markVerificationCodeAsUsed(verificationCode.id);
+    if (!claimed) {
+      return c.json({ error: 'Invalid or expired verification code' }, 400);
+    }
 
     // Check if user exists with this phone number
     let user = await dbService.getUserByPhone(phone);

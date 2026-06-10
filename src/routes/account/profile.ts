@@ -131,6 +131,28 @@ app.delete('/', standardRateLimit, async (c) => {
   try {
     const authUser = requireAuthUser(c);
 
+    // A user who is the SOLE OWNER of a team org that still has other
+    // members must transfer ownership (or delete the org) first —
+    // cascade-deleting them would orphan the org: no OWNER, stranded
+    // members, headless billing. Personal orgs die with the user.
+    const orgs = await dbService.getOrganizationsByUserId(authUser.userId);
+    for (const org of orgs) {
+      if (org.slug.startsWith('user-')) continue;
+      if (org.role !== 'OWNER') continue;
+      const members = await dbService.getOrganizationMembers(org.id);
+      const ownerCount = members.filter((m) => m.role === 'OWNER').length;
+      if (ownerCount === 1 && members.length > 1) {
+        return c.json(
+          {
+            error: `You are the only owner of "${org.name}". Transfer ownership or delete the organization first.`,
+            code: 'SOLE_ORG_OWNER',
+            organizationId: org.id,
+          },
+          409,
+        );
+      }
+    }
+
     // Account deletion is a high-signal event for fraud / abuse
     // detection. Emit BEFORE the cascade delete because the user row
     // is gone afterwards (FK on audit_events nulls user_id but the
