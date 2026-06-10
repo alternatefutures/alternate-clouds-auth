@@ -493,7 +493,12 @@ export interface OrganizationUsageCostsPrivate {
 // We apply a markup (charged = raw × (1 + rate)), not a true margin. Per-plan
 // markup (from SubscriptionPlan.usageMarkup) is preferred; see costMetering.ts.
 // Env var name kept as USAGE_MARGIN_RATE for deployment/config compatibility.
-export const USAGE_MARGIN_RATE = parseFloat(process.env.USAGE_MARGIN_RATE || '0.25'); // 25% default
+// NaN-guarded: a malformed env value (e.g. "25%") would otherwise turn EVERY
+// usage charge into NaN cents.
+const parsedMarginRate = parseFloat(process.env.USAGE_MARGIN_RATE || '0.25');
+export const USAGE_MARGIN_RATE = Number.isFinite(parsedMarginRate) && parsedMarginRate >= 0
+  ? parsedMarginRate
+  : 0.25; // 25% default
 
 // ============================================
 // HELPER FUNCTIONS
@@ -781,14 +786,20 @@ export class DatabaseService {
     };
   }
 
-  async markVerificationCodeAsUsed(id: string): Promise<void> {
-    await this.prisma.verificationCode.update({
-      where: { id },
+  /**
+   * Atomic single-use claim: only the caller that flips verified false→true
+   * wins. Returns false when the code was already consumed — two concurrent
+   * verifies with the same code must not both mint sessions (W2-16).
+   */
+  async markVerificationCodeAsUsed(id: string): Promise<boolean> {
+    const result = await this.prisma.verificationCode.updateMany({
+      where: { id, verified: false },
       data: {
         verified: true,
         verifiedAt: new Date(),
       },
     });
+    return result.count > 0;
   }
 
   async incrementVerificationAttempts(id: string): Promise<void> {

@@ -115,18 +115,24 @@ app.post('/verify', strictRateLimit, async (c) => {
         metadata: { method: 'email', reason: 'invalid_code', identifier: email },
       });
 
-      return c.json({
-        error: 'Invalid verification code',
-        attemptsRemaining: verificationCode.max_attempts - verificationCode.attempts - 1,
-      }, 400);
+      // No attemptsRemaining in the body — that hands an attacker a precise
+      // brute-force budget (W2-16).
+      return c.json({ error: 'Invalid verification code' }, 400);
     }
 
-    // Mark code as used
-    await dbService.markVerificationCodeAsUsed(verificationCode.id);
-
-    // Whitelist gate — blocks non-whitelisted users before any user creation or token issuance
+    // Whitelist gate BEFORE consuming the code — burning the OTP first meant
+    // a user whitelisted minutes later had to request a fresh code, and the
+    // 403 leaked that the submitted code was correct.
     const wl = await whitelistService.check403(email);
     if (wl) return c.json(wl.body, wl.status);
+
+    // Mark code as used — atomic claim: only the request that flips
+    // verified 0→1 proceeds, so two concurrent verifies can't both mint
+    // sessions from one code (W2-16).
+    const claimed = await dbService.markVerificationCodeAsUsed(verificationCode.id);
+    if (!claimed) {
+      return c.json({ error: 'Invalid or expired verification code' }, 400);
+    }
 
     // Check if user exists
     let user = await dbService.getUserByEmail(email);

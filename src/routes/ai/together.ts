@@ -13,6 +13,8 @@ import {
   parseOpenAIUsage,
   probeProxyRequestBody,
   processUsage,
+  processUsageFailClosed,
+  BillingFailedError,
   UsageProcessingTransformStream,
 } from './_lib/costMetering';
 
@@ -123,7 +125,7 @@ app.all('/*', async (c) => {
     if (usage) {
       const usdCostRaw = calculateTokenCost(usage.model, usage.inputTokens, usage.outputTokens);
 
-      const result = await processUsage({
+      const result = await processUsageFailClosed({
         orgBillingId: billing.orgBillingId,
         userId: billing.userId,
         serviceType: 'ai_inference',
@@ -138,6 +140,9 @@ app.all('/*', async (c) => {
       });
     }
   } catch (error) {
+    if (error instanceof BillingFailedError) {
+      return c.json({ error: 'Billing processing failed. Your account was not charged. Please retry.' }, 500);
+    }
     console.error('Error processing usage:', error);
   }
 

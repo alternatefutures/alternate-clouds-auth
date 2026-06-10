@@ -135,10 +135,13 @@ export class JWTService {
         throw new Error('Invalid token type');
       }
 
-      // Now verify with correct secret
+      // Now verify with correct secret. Pin HS256 explicitly (algorithm
+      // confusion defense) and allow small clock skew between pods (W2-19).
       const decoded = jwt.verify(token, this.accessTokenSecret, {
         issuer: 'alternatefutures-auth',
         audience: 'alternatefutures-app',
+        algorithms: ['HS256'],
+        clockTolerance: 5,
       }) as TokenPayload;
 
       return decoded;
@@ -169,10 +172,13 @@ export class JWTService {
         throw new Error('Invalid token type');
       }
 
-      // Now verify with correct secret
+      // Now verify with correct secret. HS256 pinned + small clock skew
+      // tolerance (W2-19).
       const decoded = jwt.verify(token, this.refreshTokenSecret, {
         issuer: 'alternatefutures-auth',
         audience: 'alternatefutures-app',
+        algorithms: ['HS256'],
+        clockTolerance: 5,
       }) as TokenPayload;
 
       return decoded;

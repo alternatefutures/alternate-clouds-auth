@@ -10,6 +10,8 @@ import {
   FLAT_MIN_BALANCE_CENTS,
   getOrgBillingFromRequest,
   processUsage,
+  processUsageFailClosed,
+  BillingFailedError,
 } from './_lib/costMetering';
 import { IMAGE_GENERATION_COSTS } from './_lib/costs';
 
@@ -102,7 +104,7 @@ app.all('/*', async (c) => {
   try {
     const usdCostRaw = calculateStabilityCost(model, imageCount);
 
-    const result = await processUsage({
+    const result = await processUsageFailClosed({
       orgBillingId: billing.orgBillingId,
       userId: billing.userId,
       serviceType: 'ai_inference',
@@ -130,6 +132,9 @@ app.all('/*', async (c) => {
       headers: responseHeaders,
     });
   } catch (error) {
+    if (error instanceof BillingFailedError) {
+      return c.json({ error: 'Billing processing failed. Your account was not charged. Please retry.' }, 500);
+    }
     console.error('Error processing usage:', error);
   }
 

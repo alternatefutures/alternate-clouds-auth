@@ -241,17 +241,32 @@ app.get('/callback/:provider', async (c) => {
         });
       }
     } else {
-      // Create new user
-      user = await dbService.createUser({
-        id: nanoid(),
-        email: oauthUserInfo.email,
-        email_verified: oauthUserInfo.email ? 1 : 0,
-        phone_verified: 0,
-        display_name: oauthUserInfo.name,
-        avatar_url: oauthUserInfo.picture,
-      });
+      // Link to an EXISTING account when the OAuth email already has one.
+      // Creating blindly hit the unique-email constraint (P2002 → 500),
+      // permanently locking email-first users out of OAuth login (W2-17).
+      // Safe to link: the email came from the OAuth provider (verified
+      // there), was lowercased above, and passed our whitelist gate.
+      let isNewUser = false;
+      user = oauthUserInfo.email
+        ? await dbService.getUserByEmail(oauthUserInfo.email)
+        : null;
 
-      // Create auth method
+      if (user) {
+        console.log(`[oauth] linking ${provider} to existing user ${user.id} by verified email match`);
+        await dbService.updateUser(user.id, { last_login_at: Date.now() });
+      } else {
+        isNewUser = true;
+        user = await dbService.createUser({
+          id: nanoid(),
+          email: oauthUserInfo.email,
+          email_verified: oauthUserInfo.email ? 1 : 0,
+          phone_verified: 0,
+          display_name: oauthUserInfo.name,
+          avatar_url: oauthUserInfo.picture,
+        });
+      }
+
+      // Create auth method (links the OAuth identity to the new OR existing user)
       authMethod = await dbService.createAuthMethod({
         id: nanoid(),
         user_id: user.id,
@@ -260,45 +275,52 @@ app.get('/callback/:provider', async (c) => {
         identifier,
         oauth_access_token: accessToken,
         verified: 1,
-        is_primary: 1,
+        is_primary: isNewUser ? 1 : 0,
       });
-
-      // Create default organization for new user. Wrapped so a failure here is
-      // logged explicitly (the user + auth method already committed above —
-      // failing silently would orphan the account with no workspace).
-      const orgSlug = `user-${user.id.slice(0, 8)}`;
-      const orgName = oauthUserInfo.name || oauthUserInfo.email?.split('@')[0] || 'My Organization';
-      try {
-        await dbService.createDefaultOrganizationForUser({
-          orgId: nanoid(),
-          memberId: nanoid(),
-          billingId: nanoid(),
-          billingCustomerId: nanoid(),
-          subscriptionId: nanoid(),
-          userId: user.id,
-          orgSlug,
-          orgName: `${orgName}'s Org`,
-        });
-      } catch (orgErr) {
-        console.error(`[oauth signup] default org creation failed for user ${user.id} — account has no workspace:`, orgErr);
-        throw orgErr;
-      }
 
       audit(dbService.prismaClient, {
         category: 'user',
-        action: 'user.signup',
+        action: isNewUser ? 'user.signup' : 'auth_method.linked',
         status: 'ok',
         userId: user.id,
-        payload: { method: 'oauth', provider },
+        payload: { method: 'oauth', provider, linkedToExisting: !isNewUser },
       });
 
-      void notifyNewSignup({
-        userId: user.id,
-        email: oauthUserInfo.email,
-        identifier: oauthUserInfo.email ?? oauthUserInfo.name ?? null,
-        method: `OAuth (${provider})`,
-        createdAt: new Date(),
-      });
+      // Default organization: always for brand-new users; backfill for a
+      // linked existing user only if they somehow have none (mirrors the
+      // returning-user branch above). Wrapped so a failure here is logged
+      // explicitly (the user + auth method already committed above —
+      // failing silently would orphan the account with no workspace).
+      const existingOrgs = isNewUser ? [] : await dbService.getOrganizationsByUserId(user.id);
+      if (isNewUser || existingOrgs.length === 0) {
+        const orgSlug = `user-${user.id.slice(0, 8)}`;
+        const orgName = oauthUserInfo.name || oauthUserInfo.email?.split('@')[0] || 'My Organization';
+        try {
+          await dbService.createDefaultOrganizationForUser({
+            orgId: nanoid(),
+            memberId: nanoid(),
+            billingId: nanoid(),
+            billingCustomerId: nanoid(),
+            subscriptionId: nanoid(),
+            userId: user.id,
+            orgSlug,
+            orgName: `${orgName}'s Org`,
+          });
+        } catch (orgErr) {
+          console.error(`[oauth signup] default org creation failed for user ${user.id} — account has no workspace:`, orgErr);
+          throw orgErr;
+        }
+      }
+
+      if (isNewUser) {
+        void notifyNewSignup({
+          userId: user.id,
+          email: oauthUserInfo.email,
+          identifier: oauthUserInfo.email ?? oauthUserInfo.name ?? null,
+          method: `OAuth (${provider})`,
+          createdAt: new Date(),
+        });
+      }
     }
 
     // Auto-join any pending team invitations addressed to this email.

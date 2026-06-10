@@ -94,7 +94,11 @@ async function createRedisStore(redisUrl: string): Promise<RateLimitStoreBackend
     const client = createClient({
       url: redisUrl,
       socket: {
-        reconnectStrategy: false,
+        // Reconnect with capped backoff. `reconnectStrategy: false` meant a
+        // single dropped socket permanently killed the client — every later
+        // increment threw and every rate-limited endpoint 500'd until the
+        // pod restarted (SH13).
+        reconnectStrategy: (retries: number) => Math.min(retries * 100, 3000),
       },
     });
     
@@ -209,17 +213,36 @@ export function rateLimit(config: RateLimitConfig) {
     }
 
     const key = keyGenerator(c);
-    const store = await getStore();
+    let store = await getStore();
 
+    // A Redis blip must degrade to the per-pod in-memory limiter, never
+    // bubble as a 500 on every rate-limited endpoint (SH13). The in-memory
+    // window is weaker (not shared across replicas) but keeps auth usable.
     let effectiveMax = max;
-    if (progressivePenalties) {
-      const multiplier = await store.getPenaltyMultiplier(key);
-      if (multiplier > 1) {
-        effectiveMax = Math.max(1, Math.floor(max / multiplier));
+    let result: RateLimitResult;
+    try {
+      if (progressivePenalties) {
+        const multiplier = await store.getPenaltyMultiplier(key);
+        if (multiplier > 1) {
+          effectiveMax = Math.max(1, Math.floor(max / multiplier));
+        }
       }
+      result = await store.increment(key, windowMs);
+    } catch (err) {
+      console.warn(
+        '[RateLimit] store error — using in-memory fallback for this request:',
+        (err as Error).message
+      );
+      store = memoryStore;
+      effectiveMax = max;
+      if (progressivePenalties) {
+        const multiplier = await store.getPenaltyMultiplier(key);
+        if (multiplier > 1) {
+          effectiveMax = Math.max(1, Math.floor(max / multiplier));
+        }
+      }
+      result = await store.increment(key, windowMs);
     }
-
-    const result = await store.increment(key, windowMs);
 
     c.header('X-RateLimit-Limit', effectiveMax.toString());
     c.header('X-RateLimit-Remaining', Math.max(0, effectiveMax - result.count).toString());
@@ -227,7 +250,9 @@ export function rateLimit(config: RateLimitConfig) {
 
     if (result.count > effectiveMax) {
       if (progressivePenalties) {
-        await store.recordPenalty(key, windowMs);
+        await store.recordPenalty(key, windowMs).catch((err: Error) =>
+          console.warn('[RateLimit] recordPenalty failed (non-fatal):', err.message)
+        );
       }
 
       const retryAfter = Math.ceil((result.resetAt - Date.now()) / 1000);
