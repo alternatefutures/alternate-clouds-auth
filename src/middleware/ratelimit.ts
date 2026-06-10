@@ -91,21 +91,35 @@ let redisStore: RateLimitStoreBackend | null = null;
 async function createRedisStore(redisUrl: string): Promise<RateLimitStoreBackend | null> {
   try {
     const { createClient } = await import('redis');
+    let everConnected = false;
     const client = createClient({
       url: redisUrl,
+      // Commands must reject immediately while disconnected so the
+      // middleware's try/catch can degrade to the in-memory store —
+      // a queued command would hang the request instead.
+      disableOfflineQueue: true,
       socket: {
-        // Reconnect with capped backoff. `reconnectStrategy: false` meant a
-        // single dropped socket permanently killed the client — every later
-        // increment threw and every rate-limited endpoint 500'd until the
-        // pod restarted (SH13).
-        reconnectStrategy: (retries: number) => Math.min(retries * 100, 3000),
+        connectTimeout: 3000,
+        // Reconnect with capped backoff, but ONLY after a connection was
+        // established at least once (SH13). During the initial connect the
+        // strategy must fail fast: an endless retry loop here made
+        // `client.connect()` never settle, hanging every rate-limited
+        // endpoint when Redis was down (2026-06-10 login outage).
+        reconnectStrategy: (retries: number) => {
+          if (!everConnected) return new Error('Redis unreachable at startup');
+          return Math.min(retries * 100, 3000);
+        },
       },
     });
-    
+
+    client.on('ready', () => {
+      everConnected = true;
+    });
+
     let errorLogged = false;
     client.on('error', (err) => {
       if (!errorLogged) {
-        console.warn('[RateLimit] Redis error:', err.message);
+        console.warn('[RateLimit] Redis error:', err?.message || String(err));
         errorLogged = true;
       }
     });
@@ -158,15 +172,32 @@ async function createRedisStore(redisUrl: string): Promise<RateLimitStoreBackend
 
 const memoryStore = new InMemorySlidingWindowStore();
 
-async function getStore(): Promise<RateLimitStoreBackend> {
-  if (redisStore) return redisStore;
+let redisConnectInFlight: Promise<void> | null = null;
+let lastRedisAttemptAt = 0;
+const REDIS_RETRY_INTERVAL_MS = 30_000;
 
+function connectRedisInBackground(): void {
   const redisUrl = process.env.REDIS_URL;
-  if (redisUrl && !redisStore) {
-    redisStore = await createRedisStore(redisUrl);
-    if (redisStore) return redisStore;
-  }
+  if (!redisUrl || redisStore || redisConnectInFlight) return;
+  if (Date.now() - lastRedisAttemptAt < REDIS_RETRY_INTERVAL_MS) return;
+  lastRedisAttemptAt = Date.now();
+  redisConnectInFlight = createRedisStore(redisUrl)
+    .then((store) => {
+      redisStore = store;
+    })
+    .catch(() => {})
+    .finally(() => {
+      redisConnectInFlight = null;
+    });
+}
 
+// Requests must NEVER block on a Redis connection attempt: awaiting
+// connect() per request hung every rate-limited endpoint when Redis was
+// down (2026-06-10 login outage). Connect in the background (retried at
+// most every 30s) and serve from the in-memory store until it's ready.
+function getStore(): RateLimitStoreBackend {
+  if (redisStore) return redisStore;
+  connectRedisInBackground();
   return memoryStore;
 }
 
@@ -179,7 +210,7 @@ if (process.env.NODE_ENV === 'production' && !process.env.REDIS_URL) {
 
 // Eagerly attempt Redis connection on startup
 if (process.env.REDIS_URL) {
-  getStore().catch(() => {});
+  connectRedisInBackground();
 }
 
 // ============================================
@@ -213,7 +244,7 @@ export function rateLimit(config: RateLimitConfig) {
     }
 
     const key = keyGenerator(c);
-    let store = await getStore();
+    let store = getStore();
 
     // A Redis blip must degrade to the per-pod in-memory limiter, never
     // bubble as a 500 on every rate-limited endpoint (SH13). The in-memory
