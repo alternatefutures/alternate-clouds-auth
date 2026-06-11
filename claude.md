@@ -1,213 +1,126 @@
-# Alternate Clouds Authentication Service
+# alternate-clouds-auth — Auth + Billing + AI Proxy (service-auth)
 
-## What is this project?
+Service-level guidance for AI agents. The workspace-level rules in the root
+`CLAUDE.md` (one directory up) take precedence — read them first.
+Architecture source of truth: `admin/cloud/docs/AF_TECHNICAL_DOCUMENTATION.md`
+(§6 service-auth).
 
-A standalone multi-method authentication service for the Alternate Clouds platform. Supports passwordless email/SMS, Web3 wallets, and social OAuth providers with JWT-based sessions and account linking.
+## What is this service?
 
-## Tech Stack
+Standalone Hono service on port **1601** providing authentication, billing,
+and the AI inference proxy for the AlternateFutures platform.
 
-- **Runtime**: Alternate Clouds Functions
-- **Framework**: Hono (edge-compatible)
-- **Database**: SQLite (Turso compatible)
-- **Language**: TypeScript 5.4
-- **JWT**: jsonwebtoken
-- **Crypto**: @noble/hashes, @noble/secp256k1
-- **Validation**: Zod
+- User login: email OTP, SMS OTP, EVM wallet (SIWE), OAuth (PKCE)
+- JWT sessions (15-min access, 7-day refresh, httpOnly cookies) + Personal Access Tokens (PATs)
+- Billing: Stripe (primary), Stax (ACH), Relay (crypto); subscription lifecycle (trial → expiration → grace → suspension → paid); org credit wallet (prepaid USD cents)
+- AI inference proxy to 11 providers with per-request cost metering
+
+## Tech stack
+
+- **Runtime**: Node.js (`tsx` for dev, `tsc` for build) — long-running server, NOT edge/serverless
+- **Framework**: Hono + `@hono/node-server`
+- **Database**: PostgreSQL via Prisma 6 — database `alternatefutures_auth`
+- **JWT**: jsonwebtoken · **Wallet auth**: ethers (SIWE) · **Validation**: Zod
+- **Email**: Resend (REST API) · **SMS**: Twilio · **Payments**: Stripe / Stax / Relay
+- **Secrets**: Infisical (prod) / dotenv (dev)
 - **Testing**: Vitest
 
-## Authentication Methods Supported
+> **Stale-doc warning:** this service has NOT used SQLite/Turso,
+> `better-sqlite3`, or `db/schema.sql` for a long time. The database is
+> Prisma + PostgreSQL. `npm run db:setup` and `scripts/setup-db.ts` were
+> deleted 2026-06-11 (see `admin/cloud/docs/AF_DELETION_REGISTRY.md`).
 
-1. **Email Magic Links** - Passwordless email authentication
-2. **SMS OTP** - Passwordless phone authentication
-3. **Web3 Wallets** - Sign-In with Ethereum (SIWE), MetaMask, WalletConnect, Phantom
-4. **Social OAuth** - Google, Apple, Twitter, Discord, GitHub, LinkedIn, Spotify, Instagram, Telegram, TikTok, Farcaster
-
-## Features
-
-- JWT-based sessions with refresh tokens
-- Multi-factor authentication (MFA/2FA)
-- Account linking (multiple auth methods per user)
-- Rate limiting and security measures
-- GDPR-compliant user data management
-
-## Project Structure
+## Project structure (verified 2026-06-11)
 
 ```
-alternatefutures-auth/
+alternate-clouds-auth/
 ├── src/
+│   ├── index.ts             # Entry point (port 1601; mounts /v1 top-level for OpenAI SDK compat)
 │   ├── routes/
-│   │   ├── auth/              # Authentication endpoints
-│   │   │   ├── email.ts       # Email magic link
-│   │   │   ├── sms.ts         # SMS OTP
-│   │   │   ├── wallet.ts      # Web3 wallet (SIWE)
-│   │   │   ├── oauth.ts       # Social OAuth
-│   │   │   └── session.ts     # JWT sessions
-│   │   └── account/           # Account management
-│   │       ├── profile.ts     # User profile
-│   │       └── methods.ts     # Auth methods management
-│   ├── services/
-│   │   ├── jwt.service.ts     # JWT generation/validation
-│   │   ├── email.service.ts   # Email sending (Resend)
-│   │   ├── sms.service.ts     # SMS sending (Twilio)
-│   │   ├── db.service.ts      # Database operations
-│   │   └── crypto.service.ts  # Encryption/hashing
-│   ├── middleware/
-│   │   ├── auth.ts            # JWT verification
-│   │   ├── ratelimit.ts       # Rate limiting
-│   │   └── cors.ts            # CORS configuration
-│   ├── models/
-│   │   ├── user.ts            # User model
-│   │   ├── session.ts         # Session model
-│   │   └── auth-method.ts     # Auth method model
-│   ├── utils/
-│   │   ├── otp.ts             # OTP generation
-│   │   └── validators.ts      # Input validation
-│   └── index.ts               # Main entry point
-├── db/
-│   └── schema.sql             # Database schema
-├── tests/
-│   └── auth.test.ts           # Tests
-├── .claude/                   # Claude Code configuration
-├── .env.example               # Environment variables template
-├── tsconfig.json
-└── package.json
+│   │   ├── auth/            # email, sms, wallet (SIWE), oauth, session, cli, exchange, whitelistRequest
+│   │   ├── account/         # profile, methods
+│   │   ├── tokens/          # PAT CRUD + internal validate
+│   │   ├── billing/         # customer, paymentMethods, subscriptions, invoices, usage,
+│   │   │                    #   payments, connect, webhooks, credits, internal (S2S)
+│   │   ├── ai/              # Per-provider proxies + v1.ts unified endpoint + _lib/ (cost metering, model registry)
+│   │   ├── organizations/   # Org CRUD, members, invitations
+│   │   ├── admin/           # Whitelist + user admin (introspection-secret protected)
+│   │   └── internal/        # audit, test-only endpoints
+│   ├── services/            # jwt, email (Resend), sms (Twilio), oauth, siwe, token,
+│   │                        #   payments/ (stripe|stax|relay providers), seatBilling,
+│   │                        #   trialScheduler, subscription.guard, whitelist, auditLog,
+│   │                        #   secrets (Infisical), rateLimiter, platformSync
+│   ├── middleware/          # auth (JWT first, PAT fallback), cors, ratelimit, trace
+│   ├── lib/                 # audit, requestContext, discordNotifier
+│   └── utils/               # billing, crypto, fingerprint, logger, otp, validators
+├── prisma/
+│   ├── schema.prisma        # 32 models (AuthUser, AuthMethod, Organization*, Subscription,
+│   │                        #   UsageRecord, OrganizationUsageLedger, AuditEvent, …)
+│   └── migrations/          # Committed SQL migrations
+├── scripts/
+│   ├── seed-plans.ts        # Seed subscription plans (MANDATORY after any DB reset)
+│   └── normalize-emails.ts
+└── tests/
 ```
 
-## Database Schema
+## Database — Prisma + PostgreSQL (UNBREAKABLE rules)
 
-### Tables:
-- **users** - User accounts
-- **auth_methods** - Linked authentication methods per user
-- **sessions** - Active JWT refresh tokens
-- **verification_codes** - Email/SMS verification codes
-- **siwe_challenges** - Sign-In with Ethereum challenges
-- **mfa_settings** - Multi-factor authentication settings
-- **rate_limits** - Rate limiting tracking
+- Schema: `prisma/schema.prisma` → database `alternatefutures_auth`. This is a
+  separate database and schema from the platform DB (`alternatefutures`, owned
+  by `alternate-clouds-api`).
+- After ANY schema change: `npx prisma migrate dev --name descriptive_name`
+  locally → commit the generated SQL in `prisma/migrations/`.
+- CI runs `prisma migrate deploy` on prod deploy. **NEVER `prisma db push` in production.**
+- After ANY production reset: seed plans —
+  `DATABASE_URL=... npx tsx scripts/seed-plans.ts`. Without it, billing breaks
+  silently (NaN charges, no plans).
 
-See `db/schema.sql` for complete schema.
+## API surface (summary)
 
-## API Endpoints
+- `/auth/*` — email/sms request+verify, wallet challenge+verify, OAuth initiate/callback, exchange, refresh, logout, CLI login, public whitelist requests
+- `/account/*` — profile, linked auth methods
+- `/tokens/*` — PAT create/list/delete, internal validate (`x-af-introspection-secret`)
+- `/organizations/*` — org CRUD, members, invitations
+- `/billing/*` — customer, payment methods, subscriptions, invoices, usage, payments, Stripe Connect, webhooks, credit wallet
+- `/billing/internal/*` — escrow deposit/refund, compute-debit, org-balance/markup/billing, subscription-status — S2S only, protected by `x-af-introspection-secret`, called only by service-cloud-api
+- `/admin/*` — whitelist + user admin (introspection secret; consumed by `alternate-clouds-admin`)
+- `/ai/{provider}/*` + `/v1/chat/completions` — AI proxy (JWT or PAT + `X-Organization-Id`); usage metered and debited from the org wallet; all debits use idempotency keys
 
-### Authentication
-- `POST /auth/email/request` - Request email magic link
-- `POST /auth/email/verify` - Verify email code
-- `POST /auth/sms/request` - Request SMS OTP
-- `POST /auth/sms/verify` - Verify SMS OTP
-- `POST /auth/wallet/challenge` - Get SIWE challenge
-- `POST /auth/wallet/verify` - Verify wallet signature
-- `GET /auth/oauth/:provider` - Initiate OAuth flow
-- `GET /auth/oauth/callback` - OAuth callback
-- `POST /auth/refresh` - Refresh access token
-- `POST /auth/logout` - Logout (invalidate tokens)
-
-### Account Management
-- `GET /account/profile` - Get user profile
-- `PATCH /account/profile` - Update profile
-- `GET /account/methods` - List linked auth methods
-- `POST /account/methods/link` - Link new auth method
-- `DELETE /account/methods/:id` - Unlink auth method
+Full route list: `AF_TECHNICAL_DOCUMENTATION.md` §6.
 
 ## Development
 
 ```bash
-# Install dependencies
-npm install
-
-# Copy environment variables
-cp .env.example .env
-# Fill in your API keys
-
-# Run development server
-npm run dev
-
-# Run tests
-npm test
-
-# Build for production
-npm run build
-
-# Start production server
-npm start
+pnpm install
+cp .env.example .env       # fill in keys
+pnpm dev                   # tsx watch, port 1601
+pnpm test                  # vitest
+pnpm db:migrate            # prisma migrate dev
+pnpm db:studio             # Prisma Studio on port 1610
+pnpm db:seed               # seed subscription plans
+pnpm build && pnpm start   # production build + run
 ```
 
-## Environment Variables
+## Environment variables (critical)
 
-Required:
-- `DATABASE_URL` - Database connection string
-- `JWT_SECRET` - Secret for signing JWTs
-- `JWT_REFRESH_SECRET` - Secret for refresh tokens
-- `RESEND_API_KEY` - Email service (Resend)
-- `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN` - SMS service (Twilio)
+- `DATABASE_URL` — Postgres connection (`alternatefutures_auth`)
+- `JWT_SECRET` — **MUST be identical** to service-cloud-api (`alternate-clouds-api`)
+- `AUTH_INTROSPECTION_SECRET` — **MUST be identical** to service-cloud-api
+- `STRIPE_SECRET_KEY`, `RESEND_API_KEY`, `TWILIO_*`, AI provider keys — see `.env.example`
 
-Optional (OAuth providers):
-- `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`
-- `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`
-- `TWITTER_CLIENT_ID`, `TWITTER_CLIENT_SECRET`
-- etc.
-
-See `.env.example` for full list.
+Local `.env` is dev-only. Production secrets live in K8s Secrets (see
+`admin/cloud/docs/AF_DEPLOY_PROTOCOL.md`).
 
 ## Deployment
 
-This service is designed to be deployed as an **Alternate Clouds Function**. Once the AF Functions platform is ready, this authentication service will be one of the first production deployments on the platform.
+Runs on the AF K3s cluster (namespaces `af-production` / `af-staging`) behind
+Traefik; in production it is reached at `auth.alternatefutures.ai` (port 443).
+CI: GitHub Actions → GHCR → `kubectl`. Use the `deploy-to-production` skill /
+`AF_DEPLOY_PROTOCOL.md` — do not invent a deploy path.
 
-### Deployment Target
-- **Primary**: Alternate Clouds Functions platform
-- **Development**: Node.js for local testing
+## Related docs
 
-## Security Considerations
-
-- All passwords are hashed with bcrypt (if password auth is added)
-- JWT secrets must be strong random strings
-- Rate limiting on all endpoints
-- CORS configured for your frontend domain
-- Input validation with Zod schemas
-- SQL injection protection via parameterized queries
-- XSS protection via proper output encoding
-
-## Implementation Status
-
-### ✅ Completed (MVP Backend)
-- Project structure setup
-- Database schema designed and created
-- TypeScript configuration
-- Hono server with routing
-- JWT token service (access + refresh tokens)
-- Email magic link authentication
-- Web3 wallet authentication (SIWE)
-- OAuth social providers (Google, GitHub, etc.)
-- Account linking and management
-- Rate limiting middleware
-- CORS middleware
-- Email service integration (Resend)
-- Database service layer (SQLite/Turso)
-- Authentication middleware
-- Input validation (Zod schemas)
-- Comprehensive test suite (Vitest)
-- API documentation
-- Deployment documentation
-
-### 📋 Future Enhancements (Post-MVP)
-- SMS OTP authentication
-- SMS service integration (Twilio)
-- Multi-factor authentication (MFA/2FA)
-- WebAuthn/Passkeys support
-- Magic link rate limiting improvements
-- Session management UI
-- Account recovery flows
-- Email templates customization
-
-## Related Projects
-
-- **altfutures-app** - Main SvelteKit application that uses this auth service
-- **@alternatefutures/login-button** - UI components for authentication
-
-## References
-
-- Architecture: See `altfutures-app/AUTH_SYSTEM_SPEC.md`
-- DePIN Auth: See `altfutures-app/DEPIN_AUTH_ARCHITECTURE.md`
-
----
-
-**Status**: In Development
-**Version**: 0.1.0
+- Root `CLAUDE.md` — workspace rules (handoffs, debug-first, doc review)
+- `admin/cloud/docs/AF_TECHNICAL_DOCUMENTATION.md` §6 — full service reference
+- `admin/cloud/docs/AF_ACCOUNT_INFRASTRUCTURE.md` — auth, billing, org model
+- `admin/cloud/docs/AF_DEVELOPMENT_PROCESS.md` — past incidents (search before debugging)
