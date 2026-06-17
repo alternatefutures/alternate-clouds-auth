@@ -1,0 +1,33 @@
+name: Query Inference Stats
+
+on:
+  workflow_dispatch:
+
+jobs:
+  query:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up kubectl
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBECONFIG_B64 }}" | base64 -d > ~/.kube/config
+          chmod 600 ~/.kube/config
+
+      - name: Query inference usage stats
+        run: |
+          kubectl exec deployment/service-auth -n af-production --insecure-skip-tls-verify -- \
+            node -e "
+            const { PrismaClient } = require('@prisma/client');
+            const prisma = new PrismaClient();
+            async function main() {
+              const total = await prisma.organizationUsageLog.count({ where: { serviceType: 'ai_inference' } });
+              const byProvider = await prisma.organizationUsageLog.groupBy({ by: ['provider'], where: { serviceType: 'ai_inference' }, _count: true, _sum: { usdCharged: true } });
+              const byModel = await prisma.organizationUsageLog.groupBy({ by: ['model'], where: { serviceType: 'ai_inference' }, _count: true, _sum: { usdCharged: true }, orderBy: { _count: { model: 'desc' } }, take: 20 });
+              const totalRevenue = await prisma.organizationUsageLog.aggregate({ where: { serviceType: 'ai_inference' }, _sum: { usdCharged: true, usdCostRaw: true } });
+              const oldest = await prisma.organizationUsageLog.findFirst({ where: { serviceType: 'ai_inference' }, orderBy: { createdAt: 'asc' } });
+              const newest = await prisma.organizationUsageLog.findFirst({ where: { serviceType: 'ai_inference' }, orderBy: { createdAt: 'desc' } });
+              console.log(JSON.stringify({ total, byProvider, byModel, totalRevenue, dateRange: { oldest: oldest?.createdAt, newest: newest?.createdAt } }));
+              await prisma.\$disconnect();
+            }
+            main().catch(e => { console.error(e); process.exit(1); });
+            "
