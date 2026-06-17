@@ -13,20 +13,21 @@ jobs:
           echo "${{ secrets.KUBECONFIG_B64 }}" | base64 -d > ~/.kube/config
           chmod 600 ~/.kube/config
 
-      - name: Query org balances and inference gate
+      - name: Query org balances and inference ledger
         run: |
           kubectl exec deployment/service-auth -n af-production --insecure-skip-tls-verify -- \
             node -e "
             const { PrismaClient } = require('@prisma/client');
             const prisma = new PrismaClient();
             async function main() {
-              // How many orgs have a funded balance (>0 cents)
-              const funded = await prisma.organizationUsageBalance.count({ where: { balance_cents: { gt: 0 } } });
+              const funded = await prisma.organizationUsageBalance.count({ where: { balanceCents: { gt: 0 } } });
               const total = await prisma.organizationUsageBalance.count();
-              const topBalances = await prisma.organizationUsageBalance.findMany({ orderBy: { balance_cents: 'desc' }, take: 5, select: { balance_cents: true, org_billing_id: true } });
-              // How many 402 rejections visible via audit log
-              const inferenceAudit = await prisma.auditEvent.count({ where: { action: { contains: 'inference' } } }).catch(() => -1);
-              console.log(JSON.stringify({ funded, total, topBalances, inferenceAudit }));
+              const topBalances = await prisma.organizationUsageBalance.findMany({ orderBy: { balanceCents: 'desc' }, take: 5, select: { balanceCents: true, orgBillingId: true } });
+              // Check ledger for inference debits (the actual debit records, not the usage log)
+              const inferenceDebits = await prisma.organizationUsageLedger.groupBy({ by: ['reason'], _count: true, _sum: { amountCents: true } });
+              // Any topups that happened
+              const topups = await prisma.organizationUsageLedger.count({ where: { reason: 'topup' } });
+              console.log(JSON.stringify({ funded, total, topBalances, inferenceDebits, topups }));
               await prisma.\$disconnect();
             }
             main().catch(e => { console.error(e); process.exit(1); });
