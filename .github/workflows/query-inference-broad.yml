@@ -1,0 +1,38 @@
+name: Query Inference Broad
+
+on:
+  workflow_dispatch:
+
+jobs:
+  query:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up kubectl
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBECONFIG_B64 }}" | base64 -d > ~/.kube/config
+          chmod 600 ~/.kube/config
+
+      - name: Query all usage stats broadly
+        run: |
+          kubectl exec deployment/service-auth -n af-production --insecure-skip-tls-verify -- \
+            node -e "
+            const { PrismaClient } = require('@prisma/client');
+            const prisma = new PrismaClient();
+            async function main() {
+              // All service types in the log
+              const allServiceTypes = await prisma.organizationUsageLog.groupBy({ by: ['serviceType'], _count: true });
+              // Total rows in the table
+              const totalRows = await prisma.organizationUsageLog.count();
+              // All providers
+              const allProviders = await prisma.organizationUsageLog.groupBy({ by: ['provider', 'serviceType'], _count: true, _sum: { usdCharged: true } });
+              // All resources (endpoints hit)
+              const allResources = await prisma.organizationUsageLog.groupBy({ by: ['resource', 'provider'], _count: true, orderBy: { _count: { resource: 'desc' } } });
+              // Date range of all records
+              const oldest = await prisma.organizationUsageLog.findFirst({ orderBy: { createdAt: 'asc' } });
+              const newest = await prisma.organizationUsageLog.findFirst({ orderBy: { createdAt: 'desc' } });
+              console.log(JSON.stringify({ totalRows, allServiceTypes, allProviders, allResources, dateRange: { oldest: oldest?.createdAt, newest: newest?.createdAt } }));
+              await prisma.\$disconnect();
+            }
+            main().catch(e => { console.error(e); process.exit(1); });
+            "
