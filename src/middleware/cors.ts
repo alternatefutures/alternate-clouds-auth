@@ -14,7 +14,10 @@ export const corsMiddleware = cors({
     const allowedOrigins = [
       'https://alternatefutures.ai',
       'https://www.alternatefutures.ai',
-      'https://app.alternatefutures.ai',
+      'https://app.alternatefutures.ai', // legacy — kept during the clouds. transition
+      'https://clouds.alternatefutures.ai',
+      'https://app.staging.alternatefutures.ai', // legacy staging
+      'https://clouds.staging.alternatefutures.ai',
       process.env.FRONTEND_URL || 'http://localhost:5173', // SvelteKit dev server
     ];
 
