@@ -19,6 +19,7 @@ import accountRoutes from './routes/account';
 import tokensRoutes from './routes/tokens';
 import billingRoutes from './routes/billing';
 import organizationsRoutes from './routes/organizations';
+import livekitRoutes from './routes/livekit';
 import aiRoutes from './routes/ai';
 import v1Routes from './routes/ai/v1';
 import whitelistRoutes from './routes/admin/whitelist';
@@ -204,6 +205,9 @@ app.route('/billing', billingRoutes);
 
 // Mount organizations routes
 app.route('/organizations', organizationsRoutes);
+
+// Mount LiveKit token-mint routes (Alternate Connect template; 501 until configured)
+app.route('/livekit', livekitRoutes);
 
 // Mount admin routes (protected by introspection secret)
 app.route('/admin/whitelist', whitelistRoutes);
