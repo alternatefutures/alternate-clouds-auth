@@ -90,16 +90,6 @@ export class SIWEService {
       return false;
     }
   }
-
-  /**
-   * Verify a Solana signature
-   */
-  verifySolanaSignature(message: string, signature: string, publicKey: string): boolean {
-    // TODO: Implement Solana signature verification using ed25519
-    // For MVP, we'll return false and implement this later
-    console.warn('Solana signature verification not yet implemented');
-    return false;
-  }
 }
 
 export const siweService = new SIWEService();
