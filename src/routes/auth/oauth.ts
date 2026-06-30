@@ -251,6 +251,29 @@ app.get('/callback/:provider', async (c) => {
         ? await dbService.getUserByEmail(oauthUserInfo.email)
         : null;
 
+      if (user && !oauthUserInfo.emailVerified) {
+        // C1 (2026-06-29): never auto-link to an existing account on an
+        // UNVERIFIED provider email. An attacker could register a social
+        // account with a victim's email (e.g. Discord returns verified:false
+        // accounts) and otherwise take over the victim's email/OTP account.
+        // Require explicit linking from an already-authenticated session.
+        audit(dbService.prismaClient, {
+          category: 'user',
+          action: 'auth_method.link_blocked',
+          status: 'warn',
+          userId: user.id,
+          payload: { method: 'oauth', provider, reason: 'unverified_provider_email' },
+        });
+        return c.json(
+          {
+            error: 'oauth_email_unverified',
+            message:
+              'An account already exists for this email. Sign in with your original method, then link this provider from account settings.',
+          },
+          409
+        );
+      }
+
       if (user) {
         console.log(`[oauth] linking ${provider} to existing user ${user.id} by verified email match`);
         await dbService.updateUser(user.id, { last_login_at: Date.now() });

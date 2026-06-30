@@ -123,7 +123,15 @@ app.all('/*', async (c) => {
   try {
     const usage = parseOpenAIUsage(responseBody);
     if (usage) {
-      const usdCostRaw = calculateTokenCost(usage.model, usage.inputTokens, usage.outputTokens);
+      // OpenRouter returns the authoritative cost (USD) in `usage.cost` for
+      // most models — bill that exactly when present; otherwise fall back to
+      // our per-token estimate (now frontier-tier for unlisted models).
+      // (Audit C2, 2026-06-29.)
+      const upstreamCost = (responseBody as { usage?: { cost?: unknown } })?.usage?.cost;
+      const usdCostRaw =
+        typeof upstreamCost === 'number' && upstreamCost > 0
+          ? upstreamCost
+          : calculateTokenCost(usage.model, usage.inputTokens, usage.outputTokens);
 
       const result = await processUsageFailClosed({
         orgBillingId: billing.orgBillingId,

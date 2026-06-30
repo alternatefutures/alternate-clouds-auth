@@ -232,5 +232,13 @@ export const WORLDLABS_COSTS: Record<string, number> = {
 // DEFAULT/FALLBACK COSTS
 // ============================================
 
-export const DEFAULT_INPUT_COST_PER_TOKEN = 0.001 / 1000;
-export const DEFAULT_OUTPUT_COST_PER_TOKEN = 0.002 / 1000;
+// Fallback when a model is absent from the per-model tables above (e.g. an
+// OpenRouter pass-through id we don't track, or a brand-new frontier model).
+// Set to a CONSERVATIVE frontier tier (~GPT-4o / Claude-Sonnet pricing) rather
+// than a rounding error: the old $1/$2-per-1M default undercharged unlisted
+// frontier models 15–100×, an always-on revenue leak. Listed models are
+// unaffected — add new models to the tables to bill them exactly. For
+// OpenRouter we additionally bill the upstream's authoritative `usage.cost`
+// when present (see routes/ai/openrouter.ts). (Audit C2, 2026-06-29.)
+export const DEFAULT_INPUT_COST_PER_TOKEN = 5 / 1_000_000; // $5 / 1M input tokens
+export const DEFAULT_OUTPUT_COST_PER_TOKEN = 15 / 1_000_000; // $15 / 1M output tokens

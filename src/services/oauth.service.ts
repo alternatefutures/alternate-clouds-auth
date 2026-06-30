@@ -17,6 +17,13 @@ export interface OAuthProvider {
 export interface OAuthUserInfo {
   id: string;
   email?: string;
+  /**
+   * Whether the PROVIDER has verified ownership of `email`. Auto-linking an
+   * OAuth identity to an existing email/OTP account is gated on this being
+   * true — otherwise a social account with an attacker-set, unverified email
+   * matching a victim's could take over their account. (Audit C1, 2026-06-29.)
+   */
+  emailVerified: boolean;
   name?: string;
   picture?: string;
 }
@@ -203,6 +210,8 @@ export class OAuthService {
         return {
           id: data.id,
           email: data.email,
+          // Google userinfo v2 returns `verified_email`; OIDC returns `email_verified`.
+          emailVerified: data.verified_email === true || data.email_verified === true,
           name: data.name,
           picture: data.picture,
         };
@@ -211,6 +220,10 @@ export class OAuthService {
         return {
           id: data.id.toString(),
           email: data.email,
+          // GitHub only lets a user set a *verified* email they own as the
+          // public profile email that `/user` returns, so a present email is
+          // provider-verified. (Audit C1, 2026-06-29.)
+          emailVerified: !!data.email,
           name: data.name || data.login,
           picture: data.avatar_url,
         };
@@ -219,6 +232,9 @@ export class OAuthService {
         return {
           id: data.data?.id || data.id,
           email: data.data?.email || data.email,
+          // No email scope is requested for Twitter, so any email here is
+          // unverified — never auto-link on it.
+          emailVerified: false,
           name: data.data?.name || data.name,
           picture: data.data?.profile_image_url || data.profile_image_url,
         };
@@ -227,6 +243,8 @@ export class OAuthService {
         return {
           id: data.id,
           email: data.email,
+          // Discord's /users/@me returns `verified` for the account email.
+          emailVerified: data.verified === true,
           name: data.username,
           picture: data.avatar
             ? `https://cdn.discordapp.com/avatars/${data.id}/${data.avatar}.png`
@@ -237,6 +255,8 @@ export class OAuthService {
         return {
           id: data.id,
           email: data.email,
+          // Unknown provider — treat the email as unverified (fail safe).
+          emailVerified: false,
           name: data.name,
           picture: data.picture || data.avatar_url,
         };
