@@ -15,6 +15,7 @@
  *   - `customer.subscription.updated` webhook reconciles Stripe → DB seats.
  */
 
+import { createHash } from 'node:crypto';
 import { dbService } from './db.service';
 import { getDefaultProvider } from './payments';
 import { revokePlatformMembership } from './platformSync.service';
@@ -32,12 +33,21 @@ export interface SyncSeatsResult {
  * Recompute `seats` for an org from its active member count and push the new
  * quantity to Stripe + the local subscription row. Safe to call after every
  * membership mutation. Never throws on the membership path — logs and returns.
+ *
+ * `eventId` is the identity of the membership change that triggered this sync
+ * (the created/removed OrganizationMember row id). It is baked into the trial
+ * charge/credit idempotency keys: keying on the FINAL seat count alone made
+ * add→remove→re-add within a trial reuse the first add's key, so Stripe
+ * replayed the cached paid invoice and the re-add was never charged (revenue
+ * loss, bounded by Stripe's 24h idempotency TTL). A legitimate retry of the
+ * SAME event still reuses its key — never put a bare timestamp here, or
+ * retries double-charge.
  */
 export async function syncOrgSeats(
   organizationId: string,
-  opts: { reason: string },
+  opts: { reason: string; eventId: string },
 ): Promise<SyncSeatsResult> {
-  const reason = opts.reason;
+  const { reason, eventId } = opts;
   try {
     const members = await dbService.getOrganizationMembers(organizationId);
     const targetSeats = Math.max(1, members.length);
@@ -93,8 +103,11 @@ export async function syncOrgSeats(
                     subscriptionId: subscription.stripe_subscription_id,
                     fromSeats: String(prevSeats),
                     toSeats: String(targetSeats),
+                    seatChangeEventId: eventId,
                   },
-                  idempotencyKey: `seat-trial-${organizationId}-${subscription.stripe_subscription_id}-${targetSeats}`,
+                  // Keyed on the seat-change EVENT (transition + triggering
+                  // membership-row id), NOT the final count — see the fn doc.
+                  idempotencyKey: `seat-trial-${organizationId}-${subscription.stripe_subscription_id}-${prevSeats}to${targetSeats}-${eventId}`,
                 });
               }
             } else if (seatDelta < 0 && provider.creditCustomerBalance) {
@@ -111,8 +124,12 @@ export async function syncOrgSeats(
                     subscriptionId: subscription.stripe_subscription_id,
                     fromSeats: String(prevSeats),
                     toSeats: String(targetSeats),
+                    seatChangeEventId: eventId,
                   },
-                  idempotencyKey: `seat-trial-credit-${organizationId}-${subscription.stripe_subscription_id}-${targetSeats}`,
+                  // Event-keyed like the charge above: remove→add→re-remove
+                  // must issue a fresh credit, and a retry of the SAME
+                  // removal must not issue two.
+                  idempotencyKey: `seat-trial-credit-${organizationId}-${subscription.stripe_subscription_id}-${prevSeats}to${targetSeats}-${eventId}`,
                 });
               }
             }
@@ -249,8 +266,13 @@ export async function disableOrg(organizationId: string): Promise<void> {
 
       // One final seat reconcile after the bulk removal so Stripe quantity +
       // the local seat count settle to the owner-only floor (decision: a single
-      // sync, not one per removed member).
-      await syncOrgSeats(organizationId, { reason: 'org_disabled' }).catch((err) =>
+      // sync, not one per removed member). Event identity = the removed-member
+      // set: stable if this disable is retried, distinct from any other change.
+      const disableEventId = `disable-${createHash('sha256')
+        .update([...removedUserIds].sort().join(','))
+        .digest('hex')
+        .slice(0, 16)}`;
+      await syncOrgSeats(organizationId, { reason: 'org_disabled', eventId: disableEventId }).catch((err) =>
         console.error(`[disableOrg] final seat sync failed for org ${organizationId}:`, err),
       );
     }

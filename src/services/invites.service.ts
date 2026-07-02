@@ -155,7 +155,12 @@ export async function attachMember(
     accessAllProjects: member.access_all_projects,
     projectIds: member.project_ids,
   });
-  const seatSync = await syncOrgSeats(organizationId, { reason: 'member_added' });
+  // The created member row id is the seat-change event identity — it keys
+  // the trial seat charge so a later remove→re-add mints a fresh key.
+  const seatSync = await syncOrgSeats(organizationId, {
+    reason: 'member_added',
+    eventId: member.id,
+  });
   if (!seatSync.synced) {
     // Member row exists but Stripe seats were not bumped. syncOrgSeats
     // recomputes from the member count, so the NEXT membership change
@@ -192,9 +197,16 @@ export async function updateMemberScope(
  * This is THE membership-remove funnel — keep seat sync here.
  */
 export async function detachMember(organizationId: string, userId: string): Promise<void> {
+  // Capture the row id BEFORE deletion — it is the seat-change event identity
+  // for the trial credit key (a re-add creates a new row id, so a re-added
+  // seat charges under a fresh key instead of replaying the old invoice).
+  const member = await dbService.getOrganizationMember(organizationId, userId);
   await dbService.deleteOrganizationMember(organizationId, userId);
   await revokePlatformMembership(organizationId, userId);
-  const seatSync = await syncOrgSeats(organizationId, { reason: 'member_removed' });
+  const seatSync = await syncOrgSeats(organizationId, {
+    reason: 'member_removed',
+    eventId: member?.id ?? `detach-${userId}`,
+  });
   if (!seatSync.synced) {
     console.error(
       `[invites] seat sync failed after member removal for org ${organizationId} — Stripe seat count ahead of member count until the next membership change`,

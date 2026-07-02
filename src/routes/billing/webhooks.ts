@@ -9,6 +9,7 @@ import { audit } from '../../lib/audit';
 import { dbService } from '../../services/db.service';
 import { getProvider, isProviderAvailable } from '../../services/payments';
 import {
+  isAmountCheckedStablecoin,
   isChainVerifyRequired,
   verifyRelayPaymentOnChain,
 } from '../../services/payments/relayChainVerifier';
@@ -793,6 +794,27 @@ async function processRelayEvent(event: WebhookEvent): Promise<void> {
       const tokenSymbol = payment.token_symbol;
       const tokenAddress = payment.token_address;
 
+      // === Invoice settlements are stablecoin-only (POLICY, not RPC) =======
+      // The verifier can only enforce the USD amount for a recognised
+      // stablecoin with a persisted canonical contract. A native/unknown
+      // token payment row linked to an invoice would settle the full
+      // invoice for whatever nonzero value the customer sent — reject it
+      // outright, independent of the chain-verify kill switch. (Legacy
+      // rows created before token persistence land here by design:
+      // fail closed, reconcile manually.)
+      if (payment.invoice_id && (!tokenAddress || !isAmountCheckedStablecoin(tokenSymbol))) {
+        rejectRelayPayment({
+          reason: 'invoice_requires_stablecoin',
+          paymentId: payment.id,
+          txHash,
+          details: {
+            invoiceId: payment.invoice_id,
+            tokenSymbol: tokenSymbol ?? null,
+            hasTokenAddress: Boolean(tokenAddress),
+          },
+        });
+      }
+
       if (!expectedToAddress || !Number.isFinite(chainId) || chainId <= 0) {
         rejectRelayPayment({
           reason: 'payment_record_incomplete',
@@ -880,7 +902,35 @@ async function processRelayEvent(event: WebhookEvent): Promise<void> {
       }
 
       // Invoice settlement path (one-off invoices paid in crypto).
-      await applyPaymentToInvoice(payment);
+      // Credit by the VERIFIED on-chain amount, bounded by the quoted
+      // payment amount — never by the request row alone. With the
+      // stablecoin gate above, `verifiedAmountCents` is always present
+      // when chain verification ran; the fallback to payment.amount only
+      // applies under the explicit RELAY_REQUIRE_CHAIN_VERIFY=false
+      // emergency kill switch.
+      const verifiedCents =
+        verification.ok && verification.verifiedAmountCents != null
+          ? verification.verifiedAmountCents
+          : payment.amount;
+      await applyPaymentToInvoice({
+        invoice_id: payment.invoice_id,
+        amount: Math.min(payment.amount, verifiedCents),
+      });
+      audit(dbService.prismaClient, {
+        category: 'billing',
+        action: 'billing.invoice.crypto.settled',
+        status: 'ok',
+        payload: {
+          paymentId: payment.id,
+          invoiceId: payment.invoice_id,
+          txHash,
+          chainId,
+          tokenSymbol,
+          quotedAmountCents: payment.amount,
+          verifiedAmountCents: verification.ok ? verification.verifiedAmountCents ?? null : null,
+          creditedCents: Math.min(payment.amount, verifiedCents),
+        },
+      });
       break;
     }
 

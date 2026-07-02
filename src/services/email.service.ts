@@ -168,7 +168,7 @@ export class EmailService {
           <div style="max-width: 600px; margin: 0 auto; padding: 20px;">
             <h2 style="color: #f59e0b;">Your Trial Has Ended</h2>
             <p>Hi,</p>
-            <p>Your 30-day trial for <strong>${orgName}</strong> on Alternate Clouds has ended.</p>
+            <p>Your free trial for <strong>${orgName}</strong> on Alternate Clouds has ended.</p>
             <p>You have <strong>${gracedays} days</strong> to subscribe before your access is suspended.
             During this grace period, all features remain available.</p>
             <a href="https://app.alternatefutures.ai/org/${orgId}/billing"
@@ -191,7 +191,7 @@ export class EmailService {
     await this.sendEmail({
       to: email,
       subject,
-      text: `Your 30-day trial for ${orgName} has ended. Subscribe within ${gracedays} days at https://app.alternatefutures.ai/org/${orgId}/billing`,
+      text: `Your free trial for ${orgName} has ended. Subscribe within ${gracedays} days at https://app.alternatefutures.ai/org/${orgId}/billing`,
       html,
     });
   }

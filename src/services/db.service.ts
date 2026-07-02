@@ -1650,7 +1650,9 @@ export class DatabaseService {
       throw new Error('No active subscription plan found. Run: npm run db:seed');
     }
 
-    const trialDays = defaultPlan.trialDays || 7;
+    // Fallback only fires when the plan row has trialDays=0 (misconfigured
+    // seed) — keep it equal to the seeded default (12) so both paths agree.
+    const trialDays = defaultPlan.trialDays || 12;
     const trialEndsAt = new Date(now.getTime() + trialDays * 24 * 60 * 60 * 1000);
     const periodEnd = new Date(now.getTime() + trialDays * 24 * 60 * 60 * 1000);
 

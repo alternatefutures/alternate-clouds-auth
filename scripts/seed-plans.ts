@@ -22,7 +22,7 @@ const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY || '';
  * prepaid credits wallet. The markup is applied on top of raw provider cost:
  *   charged = rawCost * (1 + usageMarkup)
  *
- * Trial: 30-day free trial + $5 signup compute credit
+ * Trial: 12-day free trial + $5 signup compute credit
  */
 const subscriptionPlans = [
   {
@@ -31,7 +31,7 @@ const subscriptionPlans = [
     usageMarkup: 0.25,
     billingInterval: 'MONTHLY',
     isActive: true,
-    trialDays: 30,
+    trialDays: 12,
     features: JSON.stringify([]),
     stripe: {
       productName: 'Alternate Clouds Monthly',
@@ -45,7 +45,7 @@ const subscriptionPlans = [
     usageMarkup: 0.20,
     billingInterval: 'YEARLY',
     isActive: true,
-    trialDays: 30,
+    trialDays: 12,
     features: JSON.stringify([]),
     stripe: {
       productName: 'Alternate Clouds Yearly',

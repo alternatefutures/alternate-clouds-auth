@@ -81,6 +81,15 @@ const STABLECOIN_DECIMALS: Record<string, number> = {
   BUSD: 18,
 };
 
+/**
+ * True when `symbol` is a stablecoin the verifier can enforce an exact
+ * USD amount for. Settlement paths that MUST NOT accept unpriced value
+ * (invoice payments) gate on this before trusting a verification result.
+ */
+export function isAmountCheckedStablecoin(symbol: string | null | undefined): boolean {
+  return symbol != null && STABLECOIN_DECIMALS[symbol.toUpperCase()] != null;
+}
+
 export interface RelayVerifyInput {
   txHash: string;
   chainId: number;
@@ -110,7 +119,16 @@ export interface RelayVerifyInput {
 }
 
 export type RelayVerifyResult =
-  | { ok: true }
+  | {
+      ok: true;
+      /**
+       * On-chain transferred value converted to USD cents (floored).
+       * Present ONLY when the stablecoin amount check ran (recognised
+       * stablecoin + tokenAddress). Callers crediting an invoice should
+       * bound the credit by this, never by an unverified request amount.
+       */
+      verifiedAmountCents?: number;
+    }
   | { ok: false; reason: string; details?: Record<string, unknown> };
 
 /**
@@ -318,6 +336,16 @@ export async function verifyRelayPaymentOnChain(
         },
       };
     }
+
+    // Report the verified on-chain value in cents (floored, capped to a
+    // safe integer) so settlement credits what actually arrived rather
+    // than a server-side assumption.
+    const verifiedCentsBig = (parsedValue * 100n) / 10n ** BigInt(decimals);
+    const verifiedAmountCents =
+      verifiedCentsBig > BigInt(Number.MAX_SAFE_INTEGER)
+        ? Number.MAX_SAFE_INTEGER
+        : Number(verifiedCentsBig);
+    return { ok: true, verifiedAmountCents };
   }
 
   return { ok: true };

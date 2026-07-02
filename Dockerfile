@@ -1,4 +1,4 @@
-FROM node:20-alpine
+FROM --platform=linux/amd64 node:20-alpine
 
 WORKDIR /app
 
@@ -20,6 +20,13 @@ RUN pnpm prune --prod --ignore-scripts
 
 # Install prisma CLI globally (needed for kubectl exec prisma migrate deploy)
 RUN npm install -g prisma@6
+
+# Drop root: run the service as an unprivileged user so an RCE in any dependency
+# (this service holds JWT_SECRET, AUTH_INTROSPECTION_SECRET, billing) does not
+# start as root inside the container. /app is chowned so runtime + `kubectl exec
+# prisma migrate deploy` still work. Listens on 3000 (>1024, no privilege needed).
+RUN addgroup -S app && adduser -S app -G app && chown -R app:app /app
+USER app
 
 EXPOSE 3000
 

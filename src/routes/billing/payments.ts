@@ -9,6 +9,12 @@ import { z } from 'zod';
 import { authMiddleware, requireAuthUser } from '../../middleware/auth';
 import { dbService } from '../../services/db.service';
 import { getProvider, getCryptoProvider, isProviderAvailable } from '../../services/payments';
+import {
+  getCanonicalStablecoinAddress,
+  isSupportedChainId,
+  isSupportedStablecoin,
+  listSupportedStablecoinsForChain,
+} from '../../services/payments/stablecoinAllowlist';
 
 const app = new Hono();
 
@@ -20,10 +26,14 @@ const processPaymentSchema = z.object({
   amount: z.number().int().min(1).optional(), // Optional partial payment
 });
 
+// Invoice crypto payments are STABLECOIN-ONLY (same allowlist as the credits
+// topup path). Native tokens are rejected because the on-chain verifier can
+// only enforce the amount for known stablecoins — a native payment would
+// settle the invoice at whatever nonzero value the customer chose to send.
 const createCryptoPaymentSchema = z.object({
   invoiceId: z.string().min(1),
-  chainId: z.number().int().min(1).optional().default(1), // Default to Ethereum mainnet
-  tokenSymbol: z.string().optional().default('usdc'),
+  chainId: z.number().int().min(1).max(1_000_000).optional().default(1), // Default to Ethereum mainnet
+  tokenSymbol: z.string().trim().min(1).max(8).optional().default('USDC'),
 });
 
 const recordCryptoPaymentSchema = z.object({
@@ -184,23 +194,57 @@ app.post('/crypto/create', async (c) => {
       return c.json({ error: 'Invoice already paid' }, 400);
     }
 
-    // Create crypto payment request
+    // Enforce the server-side (chainId, stablecoin) allowlist — same source
+    // of truth as the credits topup path. Resolving and PERSISTING the
+    // canonical token contract here is what forces the settlement webhook's
+    // on-chain verifier down the amount-checked ERC-20 branch. Without it
+    // the payment row had no token_address, the verifier took the
+    // amount-UNCHECKED native branch, and any nonzero transfer settled the
+    // full invoice as PAID.
+    const tokenSymbolUpper = data.tokenSymbol.toUpperCase();
+    if (!isSupportedChainId(data.chainId)) {
+      return c.json({ error: 'Unsupported blockchain', code: 'UNSUPPORTED_CHAIN' }, 400);
+    }
+    if (!isSupportedStablecoin(tokenSymbolUpper)) {
+      return c.json(
+        { error: 'Unsupported token. Invoice payments must use USDC, USDT or DAI.', code: 'UNSUPPORTED_TOKEN' },
+        400,
+      );
+    }
+    const canonicalTokenAddress = getCanonicalStablecoinAddress(data.chainId, tokenSymbolUpper);
+    if (!canonicalTokenAddress) {
+      return c.json(
+        {
+          error: `${tokenSymbolUpper} is not supported on chain ${data.chainId}.`,
+          code: 'UNSUPPORTED_PAIR',
+          supported: listSupportedStablecoinsForChain(data.chainId),
+        },
+        400,
+      );
+    }
+
+    // Create crypto payment request. `paymentId` is pre-generated and passed
+    // through metadata (credits.ts pattern) so the Relay webhook can resolve
+    // this exact payment row at settlement time.
+    const paymentId = nanoid();
     const cryptoProvider = getCryptoProvider();
     const paymentIntent = await cryptoProvider.createPaymentIntent({
       amount: invoice.amount_due,
       currency: invoice.currency,
       customerId: customer.id,
       chainId: data.chainId,
-      tokenSymbol: data.tokenSymbol,
+      tokenSymbol: tokenSymbolUpper.toLowerCase(),
       metadata: {
+        paymentId,
         invoiceId: invoice.id,
         userId: user.userId,
       },
     });
 
-    // Record pending payment
+    // Record pending payment with the CANONICAL token contract — never the
+    // one the provider echoes back.
     const payment = await dbService.createPayment({
-      id: nanoid(),
+      id: paymentId,
       customer_id: customer.id,
       invoice_id: invoice.id,
       amount: invoice.amount_due,
@@ -209,6 +253,8 @@ app.post('/crypto/create', async (c) => {
       provider: 'relay',
       blockchain: data.chainId.toString(),
       to_address: paymentIntent.depositAddress,
+      token_symbol: tokenSymbolUpper,
+      token_address: canonicalTokenAddress,
     });
 
     return c.json({
@@ -218,9 +264,9 @@ app.post('/crypto/create', async (c) => {
         amount: invoice.amount_due,
         currency: invoice.currency,
         depositAddress: paymentIntent.depositAddress,
-        chainId: paymentIntent.chainId,
-        tokenAddress: paymentIntent.tokenAddress,
-        tokenSymbol: data.tokenSymbol,
+        chainId: data.chainId,
+        tokenAddress: canonicalTokenAddress,
+        tokenSymbol: tokenSymbolUpper,
         expiresAt: paymentIntent.expiresAt,
       },
     });
